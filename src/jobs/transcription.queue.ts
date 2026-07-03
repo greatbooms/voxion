@@ -7,6 +7,10 @@ export type ProcessRecordingJobData = {
   recordingId: string;
 };
 
+export type EnqueueProcessRecordingInput = ProcessRecordingJobData & {
+  jobId: string;
+};
+
 @Injectable()
 export class TranscriptionQueue {
   constructor(
@@ -14,11 +18,12 @@ export class TranscriptionQueue {
     private readonly queue: Queue<ProcessRecordingJobData>,
   ) {}
 
-  async enqueue(recordingId: string): Promise<string> {
+  async enqueue(input: EnqueueProcessRecordingInput): Promise<string> {
     const job = await this.queue.add(
       PROCESS_RECORDING_JOB,
-      { recordingId },
+      { recordingId: input.recordingId },
       {
+        jobId: input.jobId,
         attempts: 3,
         backoff: { type: 'exponential', delay: 30000 },
         removeOnComplete: 100,
@@ -26,6 +31,6 @@ export class TranscriptionQueue {
       },
     );
 
-    return String(job.id);
+    return String(job.id ?? input.jobId);
   }
 }

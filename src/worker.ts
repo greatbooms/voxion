@@ -1,11 +1,11 @@
 import { Logger } from '@nestjs/common';
 import { BullRegistrar } from '@nestjs/bullmq';
 import { NestFactory } from '@nestjs/core';
-import { JobsModule } from './jobs/jobs.module';
+import { JobsWorkerModule } from './jobs/jobs.module';
 
 async function bootstrap() {
   const logger = new Logger('Worker');
-  const app = await NestFactory.createApplicationContext(JobsModule);
+  const app = await NestFactory.createApplicationContext(JobsWorkerModule);
   const registrar = app.get(BullRegistrar);
 
   registrar.register();

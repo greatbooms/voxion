@@ -1,3 +1,4 @@
+import * as crypto from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import {
   BadRequestException,
@@ -166,26 +167,16 @@ export class RecordingsService {
       throw error;
     }
 
-    let jobId: string;
+    const jobRunId = crypto.randomUUID();
+    let jobRun: { id: string };
 
     try {
-      jobId = await this.transcriptionQueue.enqueue(recording.id);
-    } catch (error) {
-      await this.markRecordingFailed(
-        recording.id,
-        ENQUEUE_RECORDING_FAILED_CODE,
-        error,
-      );
-
-      throw error;
-    }
-
-    try {
-      await this.prisma.jobRun.create({
+      jobRun = await this.prisma.jobRun.create({
         data: {
+          id: jobRunId,
           recordingId: recording.id,
           queueName: TRANSCRIPTION_QUEUE,
-          bullJobId: jobId,
+          bullJobId: jobRunId,
           status: JobRunStatus.QUEUED,
         },
       });
@@ -199,9 +190,20 @@ export class RecordingsService {
       throw error;
     }
 
+    try {
+      await this.transcriptionQueue.enqueue({
+        recordingId: recording.id,
+        jobId: jobRun.id,
+      });
+    } catch (error) {
+      await this.markQueueHandoffFailed(recording.id, jobRun.id, error);
+
+      throw error;
+    }
+
     return {
       recordingId: recording.id,
-      jobId,
+      jobId: jobRun.id,
       status: recording.status,
     };
   }
@@ -352,6 +354,32 @@ export class RecordingsService {
       });
     } catch {
       // Preserve the original queue/job-run failure after best-effort recovery.
+    }
+  }
+
+  private async markQueueHandoffFailed(
+    recordingId: string,
+    jobRunId: string,
+    error: unknown,
+  ): Promise<void> {
+    const message = this.errorMessage(error);
+
+    await this.markRecordingFailed(
+      recordingId,
+      ENQUEUE_RECORDING_FAILED_CODE,
+      error,
+    );
+
+    try {
+      await this.prisma.jobRun.update({
+        where: { id: jobRunId },
+        data: {
+          status: JobRunStatus.FAILED,
+          lastError: message,
+        },
+      });
+    } catch {
+      // Preserve the original enqueue failure after best-effort recovery.
     }
   }
 

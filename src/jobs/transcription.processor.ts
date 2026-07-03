@@ -11,8 +11,7 @@ export class TranscriptionProcessor extends WorkerHost {
 
   async process(job: Job<ProcessRecordingJobData>): Promise<void> {
     if (job.name !== PROCESS_RECORDING_JOB) {
-      this.logger.warn(`Ignoring unknown job ${job.name}`);
-      return;
+      throw new Error(`Unknown transcription job: ${job.name}`);
     }
 
     this.logger.log(`Processing recording ${job.data.recordingId}`);

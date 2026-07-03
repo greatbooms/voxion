@@ -21,7 +21,8 @@ const mockedUnlink = unlink as jest.MockedFunction<typeof unlink>;
 
 const recordingId = '00000000-0000-4000-8000-000000000001';
 const chunkId = '00000000-0000-4000-8000-000000000002';
-const bullJobId = 'bull-job-1';
+const jobRunId = '00000000-0000-4000-8000-000000000003';
+const bullJobId = jobRunId;
 const recordedAt = new Date('2026-07-02T03:04:05.000Z');
 const createdAt = new Date('2026-07-03T01:02:03.000Z');
 
@@ -144,6 +145,7 @@ describe('RecordingsController', () => {
     };
     jobRun: {
       create: jest.Mock;
+      update: jest.Mock;
     };
   };
   let storage: { saveOriginalUpload: jest.Mock };
@@ -170,9 +172,15 @@ describe('RecordingsController', () => {
         findUnique: jest.fn(),
       },
       jobRun: {
-        create: jest.fn().mockResolvedValue({
-          id: '00000000-0000-4000-8000-000000000003',
-          bullJobId,
+        create: jest.fn().mockImplementation(({ data }) =>
+          Promise.resolve({
+            id: data.id ?? jobRunId,
+            bullJobId: data.bullJobId,
+          }),
+        ),
+        update: jest.fn().mockResolvedValue({
+          id: jobRunId,
+          status: 'FAILED',
         }),
       },
     };
@@ -217,7 +225,13 @@ describe('RecordingsController', () => {
       makeFile(),
     );
 
-    expect(result).toEqual({ recordingId, jobId: bullJobId, status: 'QUEUED' });
+    const createdJobRun = prisma.jobRun.create.mock.calls[0][0].data;
+
+    expect(result).toEqual({
+      recordingId,
+      jobId: createdJobRun.id,
+      status: 'QUEUED',
+    });
 
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.recording.create).toHaveBeenCalledWith({
@@ -245,15 +259,23 @@ describe('RecordingsController', () => {
         status: 'QUEUED',
       },
     });
-    expect(transcriptionQueue.enqueue).toHaveBeenCalledWith(recordingId);
     expect(prisma.jobRun.create).toHaveBeenCalledWith({
       data: {
+        id: expect.any(String),
         recordingId,
         queueName: TRANSCRIPTION_QUEUE,
-        bullJobId,
+        bullJobId: createdJobRun.id,
         status: 'QUEUED',
       },
     });
+    expect(createdJobRun.bullJobId).toBe(createdJobRun.id);
+    expect(transcriptionQueue.enqueue).toHaveBeenCalledWith({
+      recordingId,
+      jobId: createdJobRun.id,
+    });
+    expect(
+      prisma.jobRun.create.mock.invocationCallOrder[0],
+    ).toBeLessThan(transcriptionQueue.enqueue.mock.invocationCallOrder[0]);
   });
 
   it('defaults missing recordedAt to the current date', async () => {
@@ -372,6 +394,12 @@ describe('RecordingsController', () => {
         status: 'QUEUED',
       },
     });
+    const createdJobRun = prisma.jobRun.create.mock.calls[0][0].data;
+
+    expect(transcriptionQueue.enqueue).toHaveBeenCalledWith({
+      recordingId,
+      jobId: createdJobRun.id,
+    });
     expect(prisma.recording.update).toHaveBeenNthCalledWith(2, {
       where: { id: recordingId },
       data: {
@@ -380,17 +408,23 @@ describe('RecordingsController', () => {
         errorMessage: 'redis unavailable',
       },
     });
-    expect(prisma.jobRun.create).not.toHaveBeenCalled();
+    expect(prisma.jobRun.update).toHaveBeenCalledWith({
+      where: { id: createdJobRun.id },
+      data: {
+        status: 'FAILED',
+        lastError: 'redis unavailable',
+      },
+    });
   });
 
-  it('marks the recording failed when job run creation fails after enqueue', async () => {
+  it('marks the recording failed and does not enqueue when job run creation fails', async () => {
     prisma.jobRun.create.mockRejectedValue(new Error('job run write failed'));
 
     await expect(controller.create({}, makeFile())).rejects.toThrow(
       'job run write failed',
     );
 
-    expect(transcriptionQueue.enqueue).toHaveBeenCalledWith(recordingId);
+    expect(transcriptionQueue.enqueue).not.toHaveBeenCalled();
     expect(prisma.recording.update).toHaveBeenNthCalledWith(2, {
       where: { id: recordingId },
       data: {
