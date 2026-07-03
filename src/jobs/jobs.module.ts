@@ -1,8 +1,13 @@
 import { BullModule } from '@nestjs/bullmq';
 import type { BullRootModuleOptions } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
+import { AudioModule } from '../audio/audio.module';
 import { AppConfigModule } from '../config/app-config.module';
 import { AppConfigService } from '../config/app-config.service';
+import { NotionModule } from '../notion/notion.module';
+import { PrismaModule } from '../prisma/prisma.module';
+import { StorageModule } from '../storage/storage.module';
+import { TranscriptionModule } from '../transcription/transcription.module';
 import { TRANSCRIPTION_QUEUE } from './jobs.constants';
 import { TranscriptionProcessor } from './transcription.processor';
 import { TranscriptionQueue } from './transcription.queue';
@@ -62,6 +67,11 @@ export const createWorkerBullOptions = (
 @Module({
   imports: [
     AppConfigModule,
+    AudioModule,
+    NotionModule,
+    PrismaModule,
+    StorageModule,
+    TranscriptionModule,
     BullModule.forRootAsync({
       imports: [AppConfigModule],
       inject: [AppConfigService],
