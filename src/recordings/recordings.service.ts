@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
   PayloadTooLargeException,
@@ -84,6 +85,13 @@ type RecordingResponse = {
   updatedAt: string;
   completedAt: string | null;
   chunks: RecordingChunkResponse[];
+};
+
+type TranscriptResponse = {
+  id: string;
+  text: string | null;
+  notionPageId: string | null;
+  notionUrl: string | null;
 };
 
 @Injectable()
@@ -223,6 +231,34 @@ export class RecordingsService {
     }
 
     return this.toRecordingResponse(recording);
+  }
+
+  async transcript(id: string): Promise<TranscriptResponse> {
+    if (!UUID_PATTERN.test(id)) {
+      throw new BadRequestException('Recording id must be a valid UUID.');
+    }
+
+    const recording = await this.prisma.recording.findUnique({
+      where: { id },
+    });
+
+    if (!recording) {
+      throw new NotFoundException('Recording not found.');
+    }
+
+    if (recording.status !== RecordingStatus.COMPLETED) {
+      throw new ConflictException({
+        status: recording.status,
+        message: 'Transcript is not ready.',
+      });
+    }
+
+    return {
+      id: recording.id,
+      text: recording.transcriptText,
+      notionPageId: recording.notionPageId,
+      notionUrl: recording.notionUrl,
+    };
   }
 
   private validateUpload(

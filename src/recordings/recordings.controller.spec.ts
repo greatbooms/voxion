@@ -1,8 +1,8 @@
 import { Readable } from 'node:stream';
 import { unlink } from 'node:fs/promises';
-import { INestApplication } from '@nestjs/common';
+import { ConflictException, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { Prisma } from '@prisma/client';
+import { Prisma, RecordingStatus } from '@prisma/client';
 import request from 'supertest';
 import { AppConfigService } from '../config/app-config.service';
 import { TRANSCRIPTION_QUEUE } from '../jobs/jobs.constants';
@@ -126,6 +126,13 @@ const mappedRecordingWithChunk = {
       updatedAt: createdAt.toISOString(),
     },
   ],
+};
+
+const mappedTranscript = {
+  id: recordingId,
+  text: 'hello',
+  notionPageId: 'notion-page-id',
+  notionUrl: 'https://notion.so/notion-page-id',
 };
 
 describe('RecordingsController', () => {
@@ -530,6 +537,55 @@ describe('RecordingsController', () => {
       'Recording not found.',
     );
   });
+
+  it('returns transcript details for a completed recording', async () => {
+    prisma.recording.findUnique.mockResolvedValue({
+      ...makeRecordingWithChunk(),
+      notionPageId: mappedTranscript.notionPageId,
+      notionUrl: mappedTranscript.notionUrl,
+    });
+
+    const result = await controller.transcript(recordingId);
+
+    expect(result).toEqual(mappedTranscript);
+    expect(prisma.recording.findUnique).toHaveBeenCalledWith({
+      where: { id: recordingId },
+    });
+  });
+
+  it('returns conflict when a transcript is not ready', async () => {
+    prisma.recording.findUnique.mockResolvedValue({
+      ...makeRecordingWithChunk(),
+      status: RecordingStatus.TRANSCRIBING,
+    });
+
+    try {
+      await controller.transcript(recordingId);
+      throw new Error('Expected transcript to throw.');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ConflictException);
+      expect((error as ConflictException).getResponse()).toEqual({
+        status: RecordingStatus.TRANSCRIBING,
+        message: 'Transcript is not ready.',
+      });
+    }
+  });
+
+  it('rejects invalid transcript ids before querying Prisma', async () => {
+    await expect(controller.transcript('not-a-uuid')).rejects.toThrow(
+      'Recording id must be a valid UUID.',
+    );
+
+    expect(prisma.recording.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('returns not found when transcript recording does not exist', async () => {
+    prisma.recording.findUnique.mockResolvedValue(null);
+
+    await expect(controller.transcript(recordingId)).rejects.toThrow(
+      'Recording not found.',
+    );
+  });
 });
 
 describe('RecordingsController HTTP routes', () => {
@@ -632,5 +688,30 @@ describe('RecordingsController HTTP routes', () => {
       .get(`/recordings/${recordingId}`)
       .expect(200)
       .expect(mappedRecordingWithChunk);
+  });
+
+  it('routes transcript reads to GET /recordings/:id/transcript', async () => {
+    const recordings = {
+      transcript: jest.fn().mockResolvedValue(mappedTranscript),
+      findOne: jest.fn(),
+    };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [RecordingsController],
+      providers: [
+        { provide: RecordingsService, useValue: recordings },
+        { provide: AppConfigService, useValue: { maxUploadBytes: 1024 } },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+
+    await request(app.getHttpServer())
+      .get(`/recordings/${recordingId}/transcript`)
+      .expect(200)
+      .expect(mappedTranscript);
+
+    expect(recordings.transcript).toHaveBeenCalledWith(recordingId);
+    expect(recordings.findOne).not.toHaveBeenCalled();
   });
 });

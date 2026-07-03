@@ -24,6 +24,11 @@ export class RecordingsController {
     return this.recordings.create(dto, file);
   }
 
+  @Get(':id/transcript')
+  transcript(@Param('id') id: string) {
+    return this.recordings.transcript(id);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.recordings.findOne(id);
