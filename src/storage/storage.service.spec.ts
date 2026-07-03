@@ -1,6 +1,6 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Test } from '@nestjs/testing';
 import { AppConfigService } from '../config/app-config.service';
 import { StorageModule } from './storage.module';
@@ -20,21 +20,30 @@ describe('StorageService', () => {
   });
 
   it('sanitizes original filenames and writes upload buffers', async () => {
+    const buffer = Buffer.from('audio');
     const saved = await service.saveOriginalUpload({
       recordingId: 'rec-1',
       originalFilename: '../meeting audio.m4a',
-      buffer: Buffer.from('audio'),
+      buffer,
     });
 
-    expect(saved.path).toContain('rec-1');
+    expect(dirname(saved.path)).toBe(join(root, 'originals', 'rec-1'));
     expect(saved.path.endsWith('meeting-audio.m4a')).toBe(true);
-    await expect(stat(saved.path)).resolves.toBeDefined();
+    await expect(readFile(saved.path)).resolves.toEqual(buffer);
   });
 
   it('builds chunk and transcript paths under the storage root', () => {
-    expect(service.chunkPath('rec-1', 2)).toContain('chunks/rec-1/000002.mp3');
-    expect(service.finalTranscriptPath('rec-1')).toContain(
-      'transcripts/rec-1/final.json',
+    expect(service.normalizedPath('rec-1')).toBe(
+      join(root, 'normalized', 'rec-1', 'normalized.mp3'),
+    );
+    expect(service.chunkPath('rec-1', 2)).toBe(
+      join(root, 'chunks', 'rec-1', '000002.mp3'),
+    );
+    expect(service.chunkTranscriptPath('rec-1', 2)).toBe(
+      join(root, 'transcripts', 'rec-1', 'chunks', '000002.json'),
+    );
+    expect(service.finalTranscriptPath('rec-1')).toBe(
+      join(root, 'transcripts', 'rec-1', 'final.json'),
     );
   });
 
@@ -48,7 +57,7 @@ describe('StorageService', () => {
 
     const resolved = moduleRef.get(StorageService);
 
-    expect(resolved.finalTranscriptPath('rec-1')).toContain(
+    expect(resolved.finalTranscriptPath('rec-1')).toBe(
       join(root, 'transcripts', 'rec-1', 'final.json'),
     );
 
