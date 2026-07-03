@@ -1,5 +1,8 @@
 import { Readable } from 'node:stream';
+import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
+import { Prisma } from '@prisma/client';
+import request from 'supertest';
 import { AppConfigService } from '../config/app-config.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
@@ -7,6 +10,9 @@ import { RecordingsController } from './recordings.controller';
 import { RecordingsService } from './recordings.service';
 
 const recordingId = '00000000-0000-4000-8000-000000000001';
+const chunkId = '00000000-0000-4000-8000-000000000002';
+const recordedAt = new Date('2026-07-02T03:04:05.000Z');
+const createdAt = new Date('2026-07-03T01:02:03.000Z');
 
 const makeFile = (
   overrides: Partial<Express.Multer.File> = {},
@@ -23,6 +29,92 @@ const makeFile = (
   buffer: Buffer.from('audio'),
   ...overrides,
 });
+
+const makeRecordingWithChunk = () => ({
+  id: recordingId,
+  status: 'COMPLETED',
+  title: 'Team sync',
+  originalFilename: 'meeting.m4a',
+  mimeType: 'audio/m4a',
+  originalPath: '/tmp/originals/meeting.m4a',
+  originalBytes: 9007199254740993n,
+  normalizedPath: '/tmp/normalized/meeting.wav',
+  durationSeconds: new Prisma.Decimal('123.456'),
+  language: 'en',
+  model: 'gpt-4o-transcribe',
+  chunkCount: 1,
+  transcriptPath: '/tmp/transcript.txt',
+  transcriptText: 'hello',
+  notionPageId: null,
+  notionUrl: null,
+  errorCode: null,
+  errorMessage: null,
+  recordedAt,
+  createdAt,
+  updatedAt: createdAt,
+  completedAt: createdAt,
+  chunks: [
+    {
+      id: chunkId,
+      recordingId,
+      index: 0,
+      status: 'COMPLETED',
+      path: '/tmp/chunks/0.m4a',
+      bytes: 9007199254740994n,
+      startSeconds: new Prisma.Decimal('0.000'),
+      endSeconds: new Prisma.Decimal('123.456'),
+      transcriptPath: null,
+      text: 'hello',
+      errorCode: null,
+      errorMessage: null,
+      createdAt,
+      updatedAt: createdAt,
+    },
+  ],
+});
+
+const mappedRecordingWithChunk = {
+  id: recordingId,
+  status: 'COMPLETED',
+  title: 'Team sync',
+  originalFilename: 'meeting.m4a',
+  mimeType: 'audio/m4a',
+  originalPath: '/tmp/originals/meeting.m4a',
+  originalBytes: '9007199254740993',
+  normalizedPath: '/tmp/normalized/meeting.wav',
+  durationSeconds: '123.456',
+  language: 'en',
+  model: 'gpt-4o-transcribe',
+  chunkCount: 1,
+  transcriptPath: '/tmp/transcript.txt',
+  transcriptText: 'hello',
+  notionPageId: null,
+  notionUrl: null,
+  errorCode: null,
+  errorMessage: null,
+  recordedAt: recordedAt.toISOString(),
+  createdAt: createdAt.toISOString(),
+  updatedAt: createdAt.toISOString(),
+  completedAt: createdAt.toISOString(),
+  chunks: [
+    {
+      id: chunkId,
+      recordingId,
+      index: 0,
+      status: 'COMPLETED',
+      path: '/tmp/chunks/0.m4a',
+      bytes: '9007199254740994',
+      startSeconds: '0',
+      endSeconds: '123.456',
+      transcriptPath: null,
+      text: 'hello',
+      errorCode: null,
+      errorMessage: null,
+      createdAt: createdAt.toISOString(),
+      updatedAt: createdAt.toISOString(),
+    },
+  ],
+};
 
 describe('RecordingsController', () => {
   let moduleRef: TestingModule;
@@ -100,6 +192,7 @@ describe('RecordingsController', () => {
 
     expect(result).toEqual({ recordingId, status: 'QUEUED' });
 
+    expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.recording.create).toHaveBeenCalledWith({
       data: {
         status: 'UPLOADED',
@@ -123,6 +216,53 @@ describe('RecordingsController', () => {
       data: {
         originalPath: `/tmp/originals/${recordingId}/meeting.m4a`,
         status: 'QUEUED',
+      },
+    });
+  });
+
+  it('defaults missing recordedAt to the current date', async () => {
+    jest.useFakeTimers().setSystemTime(recordedAt);
+
+    try {
+      await controller.create({ title: 'No date' }, makeFile());
+    } finally {
+      jest.useRealTimers();
+    }
+
+    expect(prisma.recording.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          recordedAt,
+        }),
+      }),
+    );
+  });
+
+  it.each(['', 'not-a-date'])(
+    'rejects invalid recordedAt value %p',
+    async (invalidRecordedAt) => {
+      await expect(
+        controller.create({ recordedAt: invalidRecordedAt }, makeFile()),
+      ).rejects.toThrow('recordedAt must be a valid ISO date string.');
+
+      expect(prisma.recording.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('marks the recording failed when storage save fails after row creation', async () => {
+    storage.saveOriginalUpload.mockRejectedValue(new Error('disk full'));
+
+    await expect(controller.create({}, makeFile())).rejects.toThrow(
+      'disk full',
+    );
+
+    expect(prisma.recording.create).toHaveBeenCalled();
+    expect(prisma.recording.update).toHaveBeenCalledWith({
+      where: { id: recordingId },
+      data: {
+        status: 'FAILED',
+        errorCode: 'STORAGE_SAVE_FAILED',
+        errorMessage: 'disk full',
       },
     });
   });
@@ -151,20 +291,92 @@ describe('RecordingsController', () => {
         {},
         makeFile({ originalname: 'meeting.txt', mimetype: 'text/plain' }),
       ),
-    ).rejects.toThrow('Unsupported audio type: text/plain');
+    ).rejects.toThrow('Unsupported media type: text/plain');
 
     expect(prisma.recording.create).not.toHaveBeenCalled();
   });
 
-  it('finds a recording with chunks ordered by index', async () => {
-    const recording = { id: recordingId, chunks: [] };
+  it('finds and maps a recording with chunks ordered by index', async () => {
+    const recording = makeRecordingWithChunk();
     prisma.recording.findUniqueOrThrow.mockResolvedValue(recording);
 
-    await expect(controller.findOne(recordingId)).resolves.toBe(recording);
+    const result = await controller.findOne(recordingId);
+
+    expect(result).toEqual(mappedRecordingWithChunk);
+    expect(() => JSON.stringify(result)).not.toThrow();
 
     expect(prisma.recording.findUniqueOrThrow).toHaveBeenCalledWith({
       where: { id: recordingId },
       include: { chunks: { orderBy: { index: 'asc' } } },
     });
+  });
+});
+
+describe('RecordingsController HTTP routes', () => {
+  let app: INestApplication | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  it('accepts multipart uploads through the controller interceptor', async () => {
+    const recordings = {
+      create: jest.fn().mockResolvedValue({ recordingId, status: 'QUEUED' }),
+    };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [RecordingsController],
+      providers: [{ provide: RecordingsService, useValue: recordings }],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+
+    await request(app.getHttpServer())
+      .post('/recordings')
+      .field('title', 'HTTP upload')
+      .field('language', 'en')
+      .attach('file', Buffer.from('audio'), {
+        filename: 'meeting.m4a',
+        contentType: 'audio/m4a',
+      })
+      .expect(201)
+      .expect({ recordingId, status: 'QUEUED' });
+
+    expect(recordings.create).toHaveBeenCalledWith(
+      { title: 'HTTP upload', language: 'en' },
+      expect.objectContaining({
+        fieldname: 'file',
+        originalname: 'meeting.m4a',
+        mimetype: 'audio/m4a',
+        size: 5,
+        buffer: Buffer.from('audio'),
+      }),
+    );
+  });
+
+  it('serializes GET responses with BigInt and Decimal fields', async () => {
+    const prisma = {
+      recording: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue(makeRecordingWithChunk()),
+      },
+    };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [RecordingsController],
+      providers: [
+        RecordingsService,
+        { provide: AppConfigService, useValue: {} },
+        { provide: PrismaService, useValue: prisma },
+        { provide: StorageService, useValue: {} },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+
+    await request(app.getHttpServer())
+      .get(`/recordings/${recordingId}`)
+      .expect(200)
+      .expect(mappedRecordingWithChunk);
   });
 });
