@@ -34,7 +34,7 @@ enum JobRunStatus {
 }
 
 model Recording {
-  id                String           @id @default(uuid())
+  id                String           @id @default(uuid()) @db.Uuid
   status            RecordingStatus  @default(UPLOADED)
   title             String?
   originalFilename  String
@@ -61,8 +61,8 @@ model Recording {
 }
 
 model RecordingChunk {
-  id             String       @id @default(uuid())
-  recordingId    String
+  id             String       @id @default(uuid()) @db.Uuid
+  recordingId    String       @db.Uuid
   recording      Recording    @relation(fields: [recordingId], references: [id], onDelete: Cascade)
   index          Int
   status         ChunkStatus  @default(PENDING)
@@ -82,8 +82,8 @@ model RecordingChunk {
 }
 
 model JobRun {
-  id           String       @id @default(uuid())
-  recordingId  String
+  id           String       @id @default(uuid()) @db.Uuid
+  recordingId  String       @db.Uuid
   recording    Recording    @relation(fields: [recordingId], references: [id], onDelete: Cascade)
   queueName    String
   bullJobId    String
