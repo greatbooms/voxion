@@ -83,17 +83,31 @@ export class TranscriptionProcessor extends WorkerHost {
         durationSeconds,
       });
 
-      await this.prisma.recordingChunk.createMany({
-        data: chunks.map((chunk) => ({
-          recordingId,
-          index: chunk.index,
-          status: 'PENDING',
-          path: chunk.path,
-          bytes: chunk.bytes,
-          startSeconds: chunk.startSeconds,
-          endSeconds: chunk.endSeconds,
-        })),
-      });
+      const persistedChunks = [];
+      for (const chunk of chunks) {
+        persistedChunks.push(
+          await this.prisma.recordingChunk.upsert({
+            where: {
+              recordingId_index: { recordingId, index: chunk.index },
+            },
+            create: {
+              recordingId,
+              index: chunk.index,
+              status: 'PENDING',
+              path: chunk.path,
+              bytes: BigInt(chunk.bytes),
+              startSeconds: chunk.startSeconds,
+              endSeconds: chunk.endSeconds,
+            },
+            update: {
+              path: chunk.path,
+              bytes: BigInt(chunk.bytes),
+              startSeconds: chunk.startSeconds,
+              endSeconds: chunk.endSeconds,
+            },
+          }),
+        );
+      }
       await this.prisma.recording.update({
         where: { id: recordingId },
         data: { status: 'TRANSCRIBING', chunkCount: chunks.length },
@@ -101,36 +115,65 @@ export class TranscriptionProcessor extends WorkerHost {
 
       const transcriptChunks: TranscriptChunk[] = [];
 
-      for (const chunk of chunks) {
-        await this.prisma.recordingChunk.update({
-          where: {
-            recordingId_index: { recordingId, index: chunk.index },
-          },
-          data: { status: 'TRANSCRIBING' },
-        });
+      for (const [chunkIndex, chunk] of chunks.entries()) {
+        const persistedChunk = persistedChunks[chunkIndex];
+        if (persistedChunk.status === 'COMPLETED' && persistedChunk.text) {
+          transcriptChunks.push(
+            this.toTranscriptChunk({
+              ...persistedChunk,
+              text: persistedChunk.text,
+            }),
+          );
+          continue;
+        }
 
-        const result = await this.transcription.transcribe({
-          path: chunk.path,
-          language: recording.language,
-        });
-        const transcriptPath = this.storage.chunkTranscriptPath(
-          recordingId,
-          chunk.index,
-        );
+        try {
+          await this.prisma.recordingChunk.update({
+            where: {
+              recordingId_index: { recordingId, index: chunk.index },
+            },
+            data: {
+              status: 'TRANSCRIBING',
+              errorCode: null,
+              errorMessage: null,
+            },
+          });
 
-        await this.storage.ensureParent(transcriptPath);
-        await writeFile(transcriptPath, JSON.stringify(result.raw, null, 2));
-        await this.prisma.recordingChunk.update({
-          where: {
-            recordingId_index: { recordingId, index: chunk.index },
-          },
-          data: {
-            status: 'COMPLETED',
-            transcriptPath,
-            text: result.text,
-          },
-        });
-        transcriptChunks.push({ ...chunk, text: result.text });
+          const result = await this.transcription.transcribe({
+            path: chunk.path,
+            language: recording.language,
+          });
+          const transcriptPath = this.storage.chunkTranscriptPath(
+            recordingId,
+            chunk.index,
+          );
+
+          await this.storage.ensureParent(transcriptPath);
+          await writeFile(transcriptPath, JSON.stringify(result.raw, null, 2));
+          await this.prisma.recordingChunk.update({
+            where: {
+              recordingId_index: { recordingId, index: chunk.index },
+            },
+            data: {
+              status: 'COMPLETED',
+              transcriptPath,
+              text: result.text,
+            },
+          });
+          transcriptChunks.push({ ...chunk, text: result.text });
+        } catch (error) {
+          await this.prisma.recordingChunk.update({
+            where: {
+              recordingId_index: { recordingId, index: chunk.index },
+            },
+            data: {
+              status: 'FAILED',
+              errorCode: 'TRANSCRIPTION_FAILED',
+              errorMessage: this.getErrorMessage(error),
+            },
+          });
+          throw error;
+        }
       }
 
       await this.prisma.recording.update({
@@ -211,10 +254,16 @@ export class TranscriptionProcessor extends WorkerHost {
         ]
       : [{ recordingId: job.data.recordingId, queueName: TRANSCRIPTION_QUEUE }];
 
-    await this.prisma.jobRun.updateMany({
+    const result = await this.prisma.jobRun.updateMany({
       where: { OR: orConditions },
       data,
     });
+    const count = result.count;
+    if (count !== 1) {
+      this.logger.warn(
+        `Job run update affected ${count} rows for recording ${job.data.recordingId}`,
+      );
+    }
   }
 
   private getAttemptsMade(job: Job<ProcessRecordingJobData>): number | undefined {
@@ -223,5 +272,23 @@ export class TranscriptionProcessor extends WorkerHost {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private toTranscriptChunk(chunk: {
+    index: number;
+    path: string;
+    bytes: bigint | number;
+    startSeconds: unknown;
+    endSeconds: unknown;
+    text: string;
+  }): TranscriptChunk {
+    return {
+      index: chunk.index,
+      path: chunk.path,
+      bytes: Number(chunk.bytes),
+      startSeconds: Number(chunk.startSeconds),
+      endSeconds: Number(chunk.endSeconds),
+      text: chunk.text,
+    };
   }
 }

@@ -67,11 +67,6 @@ export const createWorkerBullOptions = (
 @Module({
   imports: [
     AppConfigModule,
-    AudioModule,
-    NotionModule,
-    PrismaModule,
-    StorageModule,
-    TranscriptionModule,
     BullModule.forRootAsync({
       imports: [AppConfigModule],
       inject: [AppConfigService],

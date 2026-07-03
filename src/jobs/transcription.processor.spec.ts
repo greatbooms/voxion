@@ -7,7 +7,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { StorageModule } from '../storage/storage.module';
 import { TranscriptionModule } from '../transcription/transcription.module';
 import { PROCESS_RECORDING_JOB } from './jobs.constants';
-import { JobsWorkerModule } from './jobs.module';
+import { JobsModule, JobsWorkerModule } from './jobs.module';
 import { TranscriptionProcessor } from './transcription.processor';
 
 jest.mock('node:fs/promises', () => ({
@@ -117,16 +117,23 @@ describe('TranscriptionProcessor', () => {
       recording.originalPath,
       '/storage/normalized/recording.mp3',
     );
-    expect(prisma.recordingChunk.createMany).toHaveBeenCalledWith({
-      data: chunks.map((chunk) => ({
+    expect(prisma.recordingChunk.upsert).toHaveBeenNthCalledWith(1, {
+      where: { recordingId_index: { recordingId: recording.id, index: 0 } },
+      create: {
         recordingId: recording.id,
-        index: chunk.index,
+        index: 0,
         status: 'PENDING',
-        path: chunk.path,
-        bytes: chunk.bytes,
-        startSeconds: chunk.startSeconds,
-        endSeconds: chunk.endSeconds,
-      })),
+        path: chunks[0].path,
+        bytes: BigInt(chunks[0].bytes),
+        startSeconds: chunks[0].startSeconds,
+        endSeconds: chunks[0].endSeconds,
+      },
+      update: {
+        path: chunks[0].path,
+        bytes: BigInt(chunks[0].bytes),
+        startSeconds: chunks[0].startSeconds,
+        endSeconds: chunks[0].endSeconds,
+      },
     });
     expect(prisma.recording.update).toHaveBeenCalledWith({
       where: { id: recording.id },
@@ -250,6 +257,128 @@ describe('TranscriptionProcessor', () => {
         lastError: 'OpenAI unavailable',
       },
     });
+    expect(prisma.recordingChunk.update).toHaveBeenCalledWith({
+      where: { recordingId_index: { recordingId: recording.id, index: 0 } },
+      data: {
+        status: 'FAILED',
+        errorCode: 'TRANSCRIPTION_FAILED',
+        errorMessage: 'OpenAI unavailable',
+      },
+    });
+  });
+
+  it('reuses already completed chunks on retry and transcribes remaining chunks', async () => {
+    const { processor, prisma, audio, storage, openai, merge, notion } =
+      createHarness();
+    const recording = createRecording();
+    const chunks = [
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 30,
+        path: '/storage/chunks/000000.mp3',
+        bytes: 1000,
+      },
+      {
+        index: 1,
+        startSeconds: 30,
+        endSeconds: 60,
+        path: '/storage/chunks/000001.mp3',
+        bytes: 2000,
+      },
+    ];
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(60);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createDurationChunks.mockResolvedValue(chunks);
+    prisma.recordingChunk.upsert
+      .mockResolvedValueOnce({
+        recordingId: recording.id,
+        index: 0,
+        status: 'COMPLETED',
+        path: '/storage/chunks/000000.mp3',
+        bytes: 1000n,
+        startSeconds: 0,
+        endSeconds: 30,
+        transcriptPath: '/storage/transcripts/chunks/0.json',
+        text: 'Stored completed text',
+      })
+      .mockResolvedValueOnce({
+        recordingId: recording.id,
+        index: 1,
+        status: 'PENDING',
+        path: '/storage/chunks/000001.mp3',
+        bytes: 2000n,
+        startSeconds: 30,
+        endSeconds: 60,
+        transcriptPath: null,
+        text: null,
+      });
+    storage.chunkTranscriptPath.mockReturnValue('/storage/transcripts/chunks/1.json');
+    openai.transcribe.mockResolvedValue({
+      text: 'Fresh retry text',
+      raw: { fresh: true },
+    });
+    merge.merge.mockReturnValue({
+      text: 'Stored completed text\n\nFresh retry text',
+      chunks: [
+        { ...chunks[0], text: 'Stored completed text' },
+        { ...chunks[1], text: 'Fresh retry text' },
+      ],
+    });
+    storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
+    notion.createRecordingPage.mockResolvedValue({
+      pageId: 'notion-page-id',
+      url: 'https://notion.test/page',
+    });
+
+    await expect(
+      processor.process(createJob({ data: { recordingId: recording.id } })),
+    ).resolves.toBeUndefined();
+
+    expect(openai.transcribe).toHaveBeenCalledTimes(1);
+    expect(openai.transcribe).toHaveBeenCalledWith({
+      path: chunks[1].path,
+      language: recording.language,
+    });
+    expect(merge.merge).toHaveBeenCalledWith([
+      { ...chunks[0], text: 'Stored completed text' },
+      { ...chunks[1], text: 'Fresh retry text' },
+    ]);
+    expect(storage.chunkTranscriptPath).toHaveBeenCalledTimes(1);
+    expect(storage.chunkTranscriptPath).toHaveBeenCalledWith(recording.id, 1);
+  });
+
+  it('logs a warning when no job run row is updated', async () => {
+    const { processor, prisma } = createHarness();
+    const warn = jest.spyOn((processor as any).logger, 'warn');
+
+    prisma.jobRun.updateMany.mockResolvedValueOnce({ count: 0 });
+    prisma.recording.findUnique.mockResolvedValue(null);
+
+    await expect(
+      processor.process(createJob({ data: { recordingId: 'missing-recording' } })),
+    ).rejects.toThrow('Recording not found: missing-recording');
+
+    expect(warn).toHaveBeenCalledWith(
+      'Job run update affected 0 rows for recording missing-recording',
+    );
+  });
+});
+
+describe('JobsModule', () => {
+  it('does not import worker-only dependency modules', () => {
+    const imports = Reflect.getMetadata(
+      MODULE_METADATA.IMPORTS,
+      JobsModule,
+    ) as unknown[];
+
+    expect(imports).not.toEqual(expect.arrayContaining([AudioModule]));
+    expect(imports).not.toEqual(expect.arrayContaining([NotionModule]));
+    expect(imports).not.toEqual(expect.arrayContaining([PrismaModule]));
+    expect(imports).not.toEqual(expect.arrayContaining([StorageModule]));
+    expect(imports).not.toEqual(expect.arrayContaining([TranscriptionModule]));
   });
 });
 
@@ -279,11 +408,11 @@ function createHarness() {
       update: jest.fn(),
     },
     recordingChunk: {
-      createMany: jest.fn(),
+      upsert: jest.fn(({ create }) => Promise.resolve(create)),
       update: jest.fn(),
     },
     jobRun: {
-      updateMany: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
   };
   const audio = {
