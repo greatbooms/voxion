@@ -6,17 +6,16 @@ export type MergedTranscript = { text: string; chunks: ChunkTranscript[] };
 @Injectable()
 export class TranscriptMergeService {
   merge(chunks: ChunkTranscript[]): MergedTranscript {
-    const normalizedChunks = [...chunks]
-      .sort((left, right) => left.index - right.index)
-      .map((chunk) => ({
-        chunk,
-        text: this.normalizeSentences(chunk.text),
-      }))
-      .filter(({ text }) => text.length > 0);
+    const orderedChunks = [...chunks].sort(
+      (left, right) => left.index - right.index,
+    );
 
     return {
-      text: normalizedChunks.map(({ text }) => text).join('\n\n'),
-      chunks: normalizedChunks.map(({ chunk }) => chunk),
+      text: orderedChunks
+        .map((chunk) => this.normalizeSentences(chunk.text))
+        .filter((text) => text.length > 0)
+        .join('\n\n'),
+      chunks: orderedChunks,
     };
   }
 

@@ -32,18 +32,16 @@ describe('TranscriptMergeService', () => {
     expect(result.chunks[1]).toBe(second);
   });
 
-  it('trims and filters blank chunk text', () => {
-    const result = service.merge([
-      { index: 0, text: '  First.  ' },
-      { index: 1, text: '   ' },
-      { index: 2, text: '\nSecond.\n' },
-    ]);
+  it('trims and filters blank text while preserving blank chunks', () => {
+    const first = { index: 0, text: '  First.  ' };
+    const blank = { index: 1, text: '   ' };
+    const second = { index: 2, text: '\nSecond.\n' };
+
+    const result = service.merge([first, blank, second]);
 
     expect(result.text).toBe('First.\n\nSecond.');
-    expect(result.chunks).toEqual([
-      { index: 0, text: '  First.  ' },
-      { index: 2, text: '\nSecond.\n' },
-    ]);
+    expect(result.chunks).toEqual([first, blank, second]);
+    expect(result.chunks[1]).toBe(blank);
   });
 
   it('does not mutate the input array', () => {
