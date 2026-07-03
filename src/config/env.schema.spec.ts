@@ -42,4 +42,12 @@ describe('envSchema', () => {
         .REDIS_LAZY_CONNECT,
     ).toBe(false);
   });
+
+  it('defaults chunk target bytes below the OpenAI 25 MB upload boundary', () => {
+    const env = envSchema.parse({
+      ...baseEnv,
+    });
+
+    expect(env.CHUNK_TARGET_BYTES).toBe(24_000_000);
+  });
 });

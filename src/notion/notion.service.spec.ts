@@ -30,7 +30,7 @@ describe('NotionService', () => {
     const service = new NotionService({
       notionToken: undefined,
       notionDataSourceId: 'data-source-id',
-      notionVersion: '2022-06-28',
+      notionVersion: '2026-03-11',
     } as AppConfigService);
 
     await expect(service.createRecordingPage(input)).rejects.toThrow(
@@ -42,7 +42,7 @@ describe('NotionService', () => {
     const service = new NotionService({
       notionToken: 'notion-token',
       notionDataSourceId: undefined,
-      notionVersion: '2022-06-28',
+      notionVersion: '2026-03-11',
     } as AppConfigService);
 
     await expect(service.createRecordingPage(input)).rejects.toThrow(
@@ -65,7 +65,7 @@ describe('NotionService', () => {
     const service = new NotionService({
       notionToken: 'notion-token',
       notionDataSourceId: 'data-source-id',
-      notionVersion: '2022-06-28',
+      notionVersion: '2026-03-11',
     } as AppConfigService);
 
     const result = await service.createRecordingPageMetadata({
@@ -76,7 +76,7 @@ describe('NotionService', () => {
 
     expect(MockedClient).toHaveBeenCalledWith({
       auth: 'notion-token',
-      notionVersion: '2022-06-28',
+      notionVersion: '2026-03-11',
     });
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -110,16 +110,18 @@ describe('NotionService', () => {
         results: [
           {
             object: 'block',
-            type: 'paragraph',
-            paragraph: {
-              rich_text: [{ type: 'text', text: { content: 'Paragraph 1' } }],
+            type: 'heading_2',
+            heading_2: {
+              rich_text: [
+                { type: 'text', text: { content: 'Voxion Transcript' } },
+              ],
             },
           },
           {
             object: 'block',
             type: 'paragraph',
             paragraph: {
-              rich_text: [{ type: 'text', text: { content: 'Paragraph 2' } }],
+              rich_text: [{ type: 'text', text: { content: 'Paragraph 1' } }],
             },
           },
         ],
@@ -128,6 +130,13 @@ describe('NotionService', () => {
       })
       .mockResolvedValueOnce({
         results: [
+          {
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [{ type: 'text', text: { content: 'Paragraph 2' } }],
+            },
+          },
           {
             object: 'block',
             type: 'paragraph',
@@ -149,7 +158,7 @@ describe('NotionService', () => {
     const service = new NotionService({
       notionToken: 'notion-token',
       notionDataSourceId: 'data-source-id',
-      notionVersion: '2022-06-28',
+      notionVersion: '2026-03-11',
     } as AppConfigService);
     const transcript = Array.from(
       { length: 205 },
@@ -184,6 +193,121 @@ describe('NotionService', () => {
     expect(append.mock.calls[2][0].children).toHaveLength(2);
   });
 
+  it('ignores non-transcript paragraphs before the transcript marker', async () => {
+    const list = jest.fn().mockResolvedValue({
+      results: [
+        {
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: 'Template intro' } }],
+          },
+        },
+        {
+          object: 'block',
+          type: 'heading_2',
+          heading_2: {
+            rich_text: [
+              { type: 'text', text: { content: 'Voxion Transcript' } },
+            ],
+          },
+        },
+        {
+          object: 'block',
+          type: 'paragraph',
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: 'Paragraph 1' } }],
+          },
+        },
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+    const append = jest.fn().mockResolvedValue({});
+    MockedClient.mockImplementation(
+      () =>
+        ({
+          blocks: { children: { append, list } },
+        }) as unknown as Client,
+    );
+    const service = new NotionService({
+      notionToken: 'notion-token',
+      notionDataSourceId: 'data-source-id',
+      notionVersion: '2026-03-11',
+    } as AppConfigService);
+
+    await service.appendTranscriptToPage({
+      pageId: 'page-id',
+      transcript: 'Paragraph 1\n\nParagraph 2\n\nParagraph 3',
+    });
+
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(append).toHaveBeenCalledWith({
+      block_id: 'page-id',
+      children: [
+        expect.objectContaining({
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: 'Paragraph 2' } }],
+          },
+        }),
+        expect.objectContaining({
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: 'Paragraph 3' } }],
+          },
+        }),
+      ],
+    });
+  });
+
+  it('adds a transcript marker before appending transcript blocks to a fresh page', async () => {
+    const list = jest.fn().mockResolvedValue({
+      results: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    const append = jest.fn().mockResolvedValue({});
+    MockedClient.mockImplementation(
+      () =>
+        ({
+          blocks: { children: { append, list } },
+        }) as unknown as Client,
+    );
+    const service = new NotionService({
+      notionToken: 'notion-token',
+      notionDataSourceId: 'data-source-id',
+      notionVersion: '2026-03-11',
+    } as AppConfigService);
+
+    await service.appendTranscriptToPage({
+      pageId: 'page-id',
+      transcript: 'Paragraph 1\n\nParagraph 2',
+    });
+
+    expect(append).toHaveBeenCalledWith({
+      block_id: 'page-id',
+      children: [
+        expect.objectContaining({
+          type: 'heading_2',
+          heading_2: {
+            rich_text: [
+              { type: 'text', text: { content: 'Voxion Transcript' } },
+            ],
+          },
+        }),
+        expect.objectContaining({
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: 'Paragraph 1' } }],
+          },
+        }),
+        expect.objectContaining({
+          paragraph: {
+            rich_text: [{ type: 'text', text: { content: 'Paragraph 2' } }],
+          },
+        }),
+      ],
+    });
+  });
+
   it('keeps createRecordingPage backwards-compatible', async () => {
     const create = jest.fn().mockResolvedValue({
       id: 'page-id',
@@ -205,7 +329,7 @@ describe('NotionService', () => {
     const service = new NotionService({
       notionToken: 'notion-token',
       notionDataSourceId: 'data-source-id',
-      notionVersion: '2022-06-28',
+      notionVersion: '2026-03-11',
     } as AppConfigService);
 
     const result = await service.createRecordingPage(input);
@@ -230,7 +354,7 @@ describe('NotionService', () => {
       .useValue({
         notionToken: undefined,
         notionDataSourceId: undefined,
-        notionVersion: '2022-06-28',
+        notionVersion: '2026-03-11',
       })
       .compile();
 

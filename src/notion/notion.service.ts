@@ -13,9 +13,9 @@ import {
   splitTranscriptIntoParagraphBlocks,
 } from './notion-blocks';
 
-type DataSourceParent = {
-  data_source_id: string;
-};
+const TRANSCRIPT_MARKER_TEXT = 'Voxion Transcript';
+
+type AppendChildBlock = AppendBlockChildrenParameters['children'][number];
 
 export type CreateRecordingPageInput = {
   title: string;
@@ -99,16 +99,21 @@ export class NotionService {
       notionVersion: this.config.notionVersion,
     });
     const transcriptBlocks = splitTranscriptIntoParagraphBlocks(input.transcript);
-    const existingParagraphCount = await this.countExistingParagraphChildren(
+    const appendState = await this.getTranscriptAppendState(
       notion,
       input.pageId,
     );
-    const missingBlocks = transcriptBlocks.slice(existingParagraphCount);
+    const missingBlocks = transcriptBlocks.slice(
+      appendState.appendedParagraphCount,
+    );
+    const blocksToAppend: AppendChildBlock[] = appendState.markerFound
+      ? missingBlocks
+      : [createTranscriptMarkerBlock(), ...missingBlocks];
 
-    for (const batch of batchBlocks(missingBlocks, 100)) {
+    for (const batch of batchBlocks(blocksToAppend, 100)) {
       await notion.blocks.children.append({
         block_id: input.pageId,
-        children: batch as AppendBlockChildrenParameters['children'],
+        children: batch,
       });
     }
   }
@@ -118,11 +123,8 @@ export class NotionService {
     dataSourceId: string,
     uploadedAt: string,
   ): CreatePageParameters {
-    const parent: DataSourceParent = { data_source_id: dataSourceId };
-
     return {
-      // The Notion data-source API supports data_source_id, but the installed SDK types lag.
-      parent: parent as unknown as CreatePageParameters['parent'],
+      parent: { data_source_id: dataSourceId },
       properties: {
         Name: {
           title: [{ text: { content: input.title } }],
@@ -160,12 +162,13 @@ export class NotionService {
     };
   }
 
-  private async countExistingParagraphChildren(
+  private async getTranscriptAppendState(
     notion: Client,
     pageId: string,
-  ): Promise<number> {
+  ): Promise<{ markerFound: boolean; appendedParagraphCount: number }> {
     let startCursor: string | undefined;
-    let paragraphCount = 0;
+    let markerFound = false;
+    let appendedParagraphCount = 0;
 
     do {
       const request: ListBlockChildrenParameters = {
@@ -177,14 +180,24 @@ export class NotionService {
         request,
       )) as ListBlockChildrenResponse;
 
-      paragraphCount += response.results.filter(isParagraphBlock).length;
+      for (const block of response.results) {
+        if (!markerFound) {
+          markerFound = isTranscriptMarkerBlock(block);
+          continue;
+        }
+
+        if (isParagraphBlock(block)) {
+          appendedParagraphCount += 1;
+        }
+      }
+
       startCursor =
         response.has_more && response.next_cursor
           ? response.next_cursor
           : undefined;
     } while (startCursor);
 
-    return paragraphCount;
+    return { markerFound, appendedParagraphCount };
   }
 }
 
@@ -198,4 +211,42 @@ function getPageUrl(page: CreatePageResponse): string {
 
 function isParagraphBlock(block: ListBlockChildrenResponse['results'][number]) {
   return 'type' in block && block.type === 'paragraph';
+}
+
+function createTranscriptMarkerBlock(): AppendChildBlock {
+  return {
+    object: 'block',
+    type: 'heading_2',
+    heading_2: {
+      rich_text: [
+        {
+          type: 'text',
+          text: { content: TRANSCRIPT_MARKER_TEXT },
+        },
+      ],
+    },
+  };
+}
+
+function isTranscriptMarkerBlock(
+  block: ListBlockChildrenResponse['results'][number],
+): boolean {
+  if (!('type' in block) || block.type !== 'heading_2') {
+    return false;
+  }
+
+  return block.heading_2.rich_text.some((richText) => {
+    if (
+      'plain_text' in richText &&
+      richText.plain_text === TRANSCRIPT_MARKER_TEXT
+    ) {
+      return true;
+    }
+
+    return (
+      richText.type === 'text' &&
+      'text' in richText &&
+      richText.text.content === TRANSCRIPT_MARKER_TEXT
+    );
+  });
 }
