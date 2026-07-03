@@ -117,9 +117,8 @@ describe('TranscriptionProcessor', () => {
       recording.originalPath,
       '/storage/normalized/recording.mp3',
     );
-    expect(prisma.recordingChunk.upsert).toHaveBeenNthCalledWith(1, {
-      where: { recordingId_index: { recordingId: recording.id, index: 0 } },
-      create: {
+    expect(prisma.recordingChunk.create).toHaveBeenNthCalledWith(1, {
+      data: {
         recordingId: recording.id,
         index: 0,
         status: 'PENDING',
@@ -128,12 +127,21 @@ describe('TranscriptionProcessor', () => {
         startSeconds: chunks[0].startSeconds,
         endSeconds: chunks[0].endSeconds,
       },
-      update: {
-        path: chunks[0].path,
-        bytes: BigInt(chunks[0].bytes),
-        startSeconds: chunks[0].startSeconds,
-        endSeconds: chunks[0].endSeconds,
+    });
+    expect(prisma.recordingChunk.create).toHaveBeenNthCalledWith(2, {
+      data: {
+        recordingId: recording.id,
+        index: 1,
+        status: 'PENDING',
+        path: chunks[1].path,
+        bytes: BigInt(chunks[1].bytes),
+        startSeconds: chunks[1].startSeconds,
+        endSeconds: chunks[1].endSeconds,
       },
+    });
+    expect(prisma.recordingChunk.upsert).not.toHaveBeenCalled();
+    expect(prisma.recordingChunk.findUnique).toHaveBeenNthCalledWith(1, {
+      where: { recordingId_index: { recordingId: recording.id, index: 0 } },
     });
     expect(prisma.recording.update).toHaveBeenCalledWith({
       where: { id: recording.id },
@@ -305,7 +313,7 @@ describe('TranscriptionProcessor', () => {
     audio.probeDurationSeconds.mockResolvedValue(60);
     storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
     audio.createDurationChunks.mockResolvedValue(chunks);
-    prisma.recordingChunk.upsert
+    prisma.recordingChunk.findUnique
       .mockResolvedValueOnce({
         recordingId: recording.id,
         index: 0,
@@ -361,6 +369,81 @@ describe('TranscriptionProcessor', () => {
     ]);
     expect(storage.chunkTranscriptPath).toHaveBeenCalledTimes(1);
     expect(storage.chunkTranscriptPath).toHaveBeenCalledWith(recording.id, 1);
+  });
+
+  it('retranscribes a completed chunk when planned chunk metadata changed on retry', async () => {
+    const { processor, prisma, audio, storage, openai, merge, notion } =
+      createHarness();
+    const recording = createRecording();
+    const chunks = [
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 45,
+        path: '/storage/chunks/000000-new.mp3',
+        bytes: 1500,
+      },
+    ];
+    const staleCompletedChunk = {
+      recordingId: recording.id,
+      index: 0,
+      status: 'COMPLETED',
+      path: '/storage/chunks/000000-old.mp3',
+      bytes: 1000n,
+      startSeconds: 0,
+      endSeconds: 30,
+      transcriptPath: '/storage/transcripts/chunks/0-old.json',
+      text: 'Stale completed text',
+    };
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(45);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createDurationChunks.mockResolvedValue(chunks);
+    prisma.recordingChunk.findUnique.mockResolvedValueOnce(staleCompletedChunk);
+    storage.chunkTranscriptPath.mockReturnValue(
+      '/storage/transcripts/chunks/0-new.json',
+    );
+    openai.transcribe.mockResolvedValue({
+      text: 'Fresh boundary text',
+      raw: { fresh: true },
+    });
+    merge.merge.mockReturnValue({
+      text: 'Fresh boundary text',
+      chunks: [{ ...chunks[0], text: 'Fresh boundary text' }],
+    });
+    storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
+    notion.createRecordingPageMetadata.mockResolvedValue({
+      pageId: 'notion-page-id',
+      url: 'https://notion.test/page',
+    });
+
+    await expect(
+      processor.process(createJob({ data: { recordingId: recording.id } })),
+    ).resolves.toBeUndefined();
+
+    expect(prisma.recordingChunk.update).toHaveBeenNthCalledWith(1, {
+      where: { recordingId_index: { recordingId: recording.id, index: 0 } },
+      data: {
+        status: 'PENDING',
+        path: chunks[0].path,
+        bytes: BigInt(chunks[0].bytes),
+        startSeconds: chunks[0].startSeconds,
+        endSeconds: chunks[0].endSeconds,
+        transcriptPath: null,
+        text: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+    expect(openai.transcribe).toHaveBeenCalledTimes(1);
+    expect(openai.transcribe).toHaveBeenCalledWith({
+      path: chunks[0].path,
+      language: recording.language,
+    });
+    expect(merge.merge).toHaveBeenCalledWith([
+      { ...chunks[0], text: 'Fresh boundary text' },
+    ]);
   });
 
   it('reuses existing Notion page on retry instead of creating another page', async () => {
@@ -469,8 +552,16 @@ function createHarness() {
       update: jest.fn(),
     },
     recordingChunk: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      create: jest.fn(({ data }) => Promise.resolve(data)),
       upsert: jest.fn(({ create }) => Promise.resolve(create)),
-      update: jest.fn(),
+      update: jest.fn(({ data, where }) =>
+        Promise.resolve({
+          recordingId: where.recordingId_index.recordingId,
+          index: where.recordingId_index.index,
+          ...data,
+        }),
+      ),
     },
     jobRun: {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),

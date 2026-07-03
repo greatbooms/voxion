@@ -85,28 +85,7 @@ export class TranscriptionProcessor extends WorkerHost {
 
       const persistedChunks = [];
       for (const chunk of chunks) {
-        persistedChunks.push(
-          await this.prisma.recordingChunk.upsert({
-            where: {
-              recordingId_index: { recordingId, index: chunk.index },
-            },
-            create: {
-              recordingId,
-              index: chunk.index,
-              status: 'PENDING',
-              path: chunk.path,
-              bytes: BigInt(chunk.bytes),
-              startSeconds: chunk.startSeconds,
-              endSeconds: chunk.endSeconds,
-            },
-            update: {
-              path: chunk.path,
-              bytes: BigInt(chunk.bytes),
-              startSeconds: chunk.startSeconds,
-              endSeconds: chunk.endSeconds,
-            },
-          }),
-        );
+        persistedChunks.push(await this.persistPlannedChunk(recordingId, chunk));
       }
       await this.prisma.recording.update({
         where: { id: recordingId },
@@ -287,6 +266,70 @@ export class TranscriptionProcessor extends WorkerHost {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private async persistPlannedChunk(recordingId: string, chunk: CreatedChunk) {
+    const where = {
+      recordingId_index: { recordingId, index: chunk.index },
+    };
+    const metadata = {
+      path: chunk.path,
+      bytes: BigInt(chunk.bytes),
+      startSeconds: chunk.startSeconds,
+      endSeconds: chunk.endSeconds,
+    };
+    const existing = await this.prisma.recordingChunk.findUnique({ where });
+
+    if (!existing) {
+      return this.prisma.recordingChunk.create({
+        data: {
+          recordingId,
+          index: chunk.index,
+          status: 'PENDING',
+          ...metadata,
+        },
+      });
+    }
+
+    if (this.chunkMetadataMatches(existing, chunk)) {
+      return existing;
+    }
+
+    return this.prisma.recordingChunk.update({
+      where,
+      data: {
+        status: 'PENDING',
+        ...metadata,
+        transcriptPath: null,
+        text: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
+  }
+
+  private chunkMetadataMatches(
+    persisted: {
+      path: string;
+      bytes: bigint | number;
+      startSeconds: unknown;
+      endSeconds: unknown;
+    },
+    planned: CreatedChunk,
+  ): boolean {
+    return (
+      persisted.path === planned.path &&
+      this.normalizeComparable(persisted.bytes) ===
+        this.normalizeComparable(BigInt(planned.bytes)) &&
+      this.normalizeComparable(persisted.startSeconds) ===
+        this.normalizeComparable(planned.startSeconds) &&
+      this.normalizeComparable(persisted.endSeconds) ===
+        this.normalizeComparable(planned.endSeconds)
+    );
+  }
+
+  private normalizeComparable(value: unknown): string {
+    return String(value);
   }
 
   private toTranscriptChunk(chunk: {
