@@ -15,19 +15,26 @@ import {
 } from '@prisma/client';
 import { AppConfigService } from '../config/app-config.service';
 import { TRANSCRIPTION_QUEUE } from '../jobs/jobs.constants';
-import { TranscriptionQueue } from '../jobs/transcription.queue';
+import { QueueJobState, TranscriptionQueue } from '../jobs/transcription.queue';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateRecordingDto } from './dto/create-recording.dto';
 
 const SUPPORTED_MEDIA_MIME_TYPES = new Set([
   'audio/mpeg',
+  'audio/mp3',
   'audio/mp4',
   'audio/mpga',
   'audio/m4a',
+  'audio/x-m4a',
+  'audio/aac',
   'audio/wav',
+  'audio/x-wav',
+  'audio/wave',
+  'audio/vnd.wave',
   'audio/webm',
   'video/mp4',
+  'video/webm',
 ]);
 
 const STORAGE_SAVE_FAILED_CODE = 'STORAGE_SAVE_FAILED';
@@ -49,12 +56,9 @@ type RecordingChunkResponse = {
   recordingId: string;
   index: number;
   status: ChunkStatus;
-  path: string;
   bytes: string;
   startSeconds: string;
   endSeconds: string;
-  transcriptPath: string | null;
-  text: string | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -67,15 +71,11 @@ type RecordingResponse = {
   title: string | null;
   originalFilename: string;
   mimeType: string;
-  originalPath: string;
   originalBytes: string;
-  normalizedPath: string | null;
   durationSeconds: string | null;
   language: string;
   model: string;
   chunkCount: number;
-  transcriptPath: string | null;
-  transcriptText: string | null;
   notionPageId: string | null;
   notionUrl: string | null;
   errorCode: string | null;
@@ -94,6 +94,19 @@ type TranscriptResponse = {
   notionUrl: string | null;
 };
 
+type JobResponse = {
+  id: string;
+  recordingId: string;
+  queueName: string;
+  bullJobId: string;
+  status: JobRunStatus;
+  attemptsMade: number;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  queue: QueueJobState | null;
+};
+
 @Injectable()
 export class RecordingsService {
   constructor(
@@ -109,11 +122,13 @@ export class RecordingsService {
   ): Promise<{ recordingId: string; jobId: string; status: RecordingStatus }> {
     let recordedAt: Date;
     let language: string;
+    let title: string | undefined;
 
     try {
       this.validateUpload(file);
       recordedAt = this.parseRecordedAt(dto.recordedAt);
       language = this.parseLanguage(dto.language);
+      title = this.parseTitle(dto.title);
     } catch (error) {
       await this.removeTempUpload(file);
       throw error;
@@ -125,7 +140,7 @@ export class RecordingsService {
       uploaded = await this.prisma.recording.create({
         data: {
           status: RecordingStatus.UPLOADED,
-          title: dto.title,
+          title,
           originalFilename: file.originalname,
           mimeType: file.mimetype,
           originalPath: '',
@@ -273,6 +288,41 @@ export class RecordingsService {
     };
   }
 
+  async findJob(id: string): Promise<JobResponse> {
+    if (!UUID_PATTERN.test(id)) {
+      throw new BadRequestException('Job id must be a valid UUID.');
+    }
+
+    const jobRun = await this.prisma.jobRun.findUnique({ where: { id } });
+
+    if (!jobRun) {
+      throw new NotFoundException('Job not found.');
+    }
+
+    // Queue state is best-effort operational detail; the persisted job run
+    // must stay readable even when Redis is unreachable.
+    let queue: JobResponse['queue'] = null;
+
+    try {
+      queue = await this.transcriptionQueue.getJobState(jobRun.bullJobId);
+    } catch {
+      queue = null;
+    }
+
+    return {
+      id: jobRun.id,
+      recordingId: jobRun.recordingId,
+      queueName: jobRun.queueName,
+      bullJobId: jobRun.bullJobId,
+      status: jobRun.status,
+      attemptsMade: jobRun.attemptsMade,
+      lastError: jobRun.lastError,
+      createdAt: jobRun.createdAt.toISOString(),
+      updatedAt: jobRun.updatedAt.toISOString(),
+      queue,
+    };
+  }
+
   private validateUpload(
     file?: Express.Multer.File,
   ): asserts file is Express.Multer.File {
@@ -375,7 +425,23 @@ export class RecordingsService {
       throw new BadRequestException('language must be a valid language tag.');
     }
 
-    return language;
+    // OpenAI transcription only accepts ISO-639-1 primary subtags, so
+    // "ko-KR" must be stored as "ko" before it reaches the worker.
+    return language.split('-')[0].toLowerCase();
+  }
+
+  private parseTitle(title: unknown): string | undefined {
+    if (title === undefined) {
+      return undefined;
+    }
+
+    if (typeof title !== 'string') {
+      throw new BadRequestException('title must be a string.');
+    }
+
+    const trimmed = title.trim();
+
+    return trimmed === '' ? undefined : trimmed;
   }
 
   private async removeSavedFile(path: string): Promise<void> {
@@ -469,15 +535,11 @@ export class RecordingsService {
       title: recording.title,
       originalFilename: recording.originalFilename,
       mimeType: recording.mimeType,
-      originalPath: recording.originalPath,
       originalBytes: recording.originalBytes.toString(),
-      normalizedPath: recording.normalizedPath,
       durationSeconds: recording.durationSeconds?.toString() ?? null,
       language: recording.language,
       model: recording.model,
       chunkCount: recording.chunkCount,
-      transcriptPath: recording.transcriptPath,
-      transcriptText: recording.transcriptText,
       notionPageId: recording.notionPageId,
       notionUrl: recording.notionUrl,
       errorCode: recording.errorCode,
@@ -491,12 +553,9 @@ export class RecordingsService {
         recordingId: chunk.recordingId,
         index: chunk.index,
         status: chunk.status,
-        path: chunk.path,
         bytes: chunk.bytes.toString(),
         startSeconds: chunk.startSeconds.toString(),
         endSeconds: chunk.endSeconds.toString(),
-        transcriptPath: chunk.transcriptPath,
-        text: chunk.text,
         errorCode: chunk.errorCode,
         errorMessage: chunk.errorMessage,
         createdAt: chunk.createdAt.toISOString(),

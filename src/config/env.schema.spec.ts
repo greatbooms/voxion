@@ -48,6 +48,6 @@ describe('envSchema', () => {
       ...baseEnv,
     });
 
-    expect(env.CHUNK_TARGET_BYTES).toBe(24_000_000);
+    expect(env.CHUNK_TARGET_BYTES).toBe(25_165_824);
   });
 });

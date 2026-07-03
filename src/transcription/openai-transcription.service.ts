@@ -26,10 +26,20 @@ export class OpenaiTranscriptionService {
     const result = await client.audio.transcriptions.create({
       file: createReadStream(input.path),
       model: this.config.openaiTranscriptionModel,
-      language: input.language,
+      language: toIso639Primary(input.language),
       response_format: 'json',
     });
 
     return { text: result.text, raw: result };
   }
+}
+
+// OpenAI rejects region-qualified tags like "ko-KR"; it only accepts
+// ISO-639-1 primary subtags.
+function toIso639Primary(language?: string): string | undefined {
+  if (!language) {
+    return undefined;
+  }
+
+  return language.split('-')[0].toLowerCase();
 }

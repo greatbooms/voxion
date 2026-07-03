@@ -17,12 +17,41 @@ jest.mock('node:fs/promises', () => ({
 const mockedRunCommand = jest.mocked(runCommand);
 const mockedStat = jest.mocked(stat);
 
+const recordingId = '550e8400-e29b-41d4-a716-446655440000';
+const chunkPathFor = (index: number) =>
+  `/storage/chunks/${recordingId}/${String(index).padStart(6, '0')}.mp3`;
+
+const silencedetectArgs = (path: string) => [
+  '-hide_banner',
+  '-nostats',
+  '-i',
+  path,
+  '-af',
+  'silencedetect=noise=-30dB:d=0.4',
+  '-f',
+  'null',
+  '-',
+];
+
+const cutArgs = (start: number, end: number, index: number) => [
+  '-y',
+  '-i',
+  '/storage/normalized.mp3',
+  '-ss',
+  String(start),
+  '-to',
+  String(end),
+  '-c',
+  'copy',
+  chunkPathFor(index),
+];
+
 describe('AudioService', () => {
   const config = { chunkTargetBytes: 25_165_824 };
   const storage = {
     ensureParent: jest.fn(),
-    chunkPath: jest.fn((recordingId: string, index: number) =>
-      `/storage/chunks/${recordingId}/${String(index).padStart(6, '0')}.mp3`,
+    chunkPath: jest.fn((id: string, index: number) =>
+      `/storage/chunks/${id}/${String(index).padStart(6, '0')}.mp3`,
     ),
   };
 
@@ -37,17 +66,18 @@ describe('AudioService', () => {
     );
   });
 
-  it('plans 3600 seconds into four 900 second chunks', () => {
+  it('plans forced duration splits with a trailing overlap window', () => {
     expect(
       service.planDurationChunks({
         durationSeconds: 3600,
         maxChunkSeconds: 900,
       }),
     ).toEqual([
-      { index: 0, startSeconds: 0, endSeconds: 900 },
-      { index: 1, startSeconds: 900, endSeconds: 1800 },
-      { index: 2, startSeconds: 1800, endSeconds: 2700 },
-      { index: 3, startSeconds: 2700, endSeconds: 3600 },
+      { index: 0, startSeconds: 0, endSeconds: 900, overlapSeconds: 0 },
+      { index: 1, startSeconds: 898, endSeconds: 1798, overlapSeconds: 2 },
+      { index: 2, startSeconds: 1796, endSeconds: 2696, overlapSeconds: 2 },
+      { index: 3, startSeconds: 2694, endSeconds: 3594, overlapSeconds: 2 },
+      { index: 4, startSeconds: 3592, endSeconds: 3600, overlapSeconds: 2 },
     ]);
   });
 
@@ -58,11 +88,51 @@ describe('AudioService', () => {
         maxChunkSeconds: 900,
       }),
     ).toEqual([
-      { index: 0, startSeconds: 0, endSeconds: 900 },
-      { index: 1, startSeconds: 900, endSeconds: 1800 },
-      { index: 2, startSeconds: 1800, endSeconds: 2700 },
-      { index: 3, startSeconds: 2700, endSeconds: 3600 },
-      { index: 4, startSeconds: 3600, endSeconds: 3600.5 },
+      { index: 0, startSeconds: 0, endSeconds: 900, overlapSeconds: 0 },
+      { index: 1, startSeconds: 898, endSeconds: 1798, overlapSeconds: 2 },
+      { index: 2, startSeconds: 1796, endSeconds: 2696, overlapSeconds: 2 },
+      { index: 3, startSeconds: 2694, endSeconds: 3594, overlapSeconds: 2 },
+      { index: 4, startSeconds: 3592, endSeconds: 3600.5, overlapSeconds: 2 },
+    ]);
+  });
+
+  it('prefers silence midpoints over forced splits and skips the overlap there', () => {
+    expect(
+      service.planDurationChunks({
+        durationSeconds: 1800,
+        maxChunkSeconds: 900,
+        silences: [{ startSeconds: 799, endSeconds: 801 }],
+      }),
+    ).toEqual([
+      { index: 0, startSeconds: 0, endSeconds: 800, overlapSeconds: 0 },
+      { index: 1, startSeconds: 800, endSeconds: 1700, overlapSeconds: 0 },
+      { index: 2, startSeconds: 1698, endSeconds: 1800, overlapSeconds: 2 },
+    ]);
+  });
+
+  it('ignores silence midpoints in the first half of the window', () => {
+    expect(
+      service.planDurationChunks({
+        durationSeconds: 1000,
+        maxChunkSeconds: 900,
+        silences: [{ startSeconds: 100, endSeconds: 102 }],
+      }),
+    ).toEqual([
+      { index: 0, startSeconds: 0, endSeconds: 900, overlapSeconds: 0 },
+      { index: 1, startSeconds: 898, endSeconds: 1000, overlapSeconds: 2 },
+    ]);
+  });
+
+  it('skips the overlap window for very short chunk targets', () => {
+    expect(
+      service.planDurationChunks({
+        durationSeconds: 3,
+        maxChunkSeconds: 1,
+      }),
+    ).toEqual([
+      { index: 0, startSeconds: 0, endSeconds: 1, overlapSeconds: 0 },
+      { index: 1, startSeconds: 1, endSeconds: 2, overlapSeconds: 0 },
+      { index: 2, startSeconds: 2, endSeconds: 3, overlapSeconds: 0 },
     ]);
   });
 
@@ -139,98 +209,192 @@ describe('AudioService', () => {
     ]);
   });
 
-  it('creates 45 minute duration chunks and rejects oversized output', async () => {
+  it('parses silencedetect output into silence ranges', async () => {
+    mockedRunCommand.mockResolvedValue(
+      [
+        '[silencedetect @ 0x0] silence_start: 12.5',
+        '[silencedetect @ 0x0] silence_end: 14.25 | silence_duration: 1.75',
+        '[silencedetect @ 0x0] silence_start: 100',
+        '[silencedetect @ 0x0] silence_end: 101 | silence_duration: 1',
+        '[silencedetect @ 0x0] silence_start: 200',
+      ].join('\n'),
+    );
+
+    await expect(service.detectSilences('/storage/normalized.mp3')).resolves.toEqual(
+      [
+        { startSeconds: 12.5, endSeconds: 14.25 },
+        { startSeconds: 100, endSeconds: 101 },
+      ],
+    );
+
+    expect(mockedRunCommand).toHaveBeenCalledWith(
+      'ffmpeg',
+      silencedetectArgs('/storage/normalized.mp3'),
+    );
+  });
+
+  it('cuts a single chunk without running silence detection', async () => {
+    mockedRunCommand.mockResolvedValue('');
+    mockedStat.mockResolvedValue({ size: 750 } as Awaited<
+      ReturnType<typeof stat>
+    >);
+
+    const chunks = await service.createChunks({
+      recordingId,
+      normalizedPath: '/storage/normalized.mp3',
+      durationSeconds: 60,
+    });
+
+    expect(mockedRunCommand).toHaveBeenCalledTimes(1);
+    expect(mockedRunCommand).toHaveBeenCalledWith('ffmpeg', cutArgs(0, 60, 0));
+    expect(chunks).toEqual([
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 60,
+        overlapSeconds: 0,
+        path: chunkPathFor(0),
+        bytes: 750,
+      },
+    ]);
+  });
+
+  it('splits long audio at detected silences before forcing duration cuts', async () => {
+    mockedRunCommand
+      .mockResolvedValueOnce(
+        [
+          'silence_start: 2000',
+          'silence_end: 2004 | silence_duration: 4',
+        ].join('\n'),
+      )
+      .mockResolvedValue('');
+    mockedStat.mockResolvedValue({ size: 750 } as Awaited<
+      ReturnType<typeof stat>
+    >);
+
+    const chunks = await service.createChunks({
+      recordingId,
+      normalizedPath: '/storage/normalized.mp3',
+      durationSeconds: 3600,
+    });
+
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      1,
+      'ffmpeg',
+      silencedetectArgs('/storage/normalized.mp3'),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      2,
+      'ffmpeg',
+      cutArgs(0, 2002, 0),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      3,
+      'ffmpeg',
+      cutArgs(2002, 3600, 1),
+    );
+    expect(chunks).toEqual([
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 2002,
+        overlapSeconds: 0,
+        path: chunkPathFor(0),
+        bytes: 750,
+      },
+      {
+        index: 1,
+        startSeconds: 2002,
+        endSeconds: 3600,
+        overlapSeconds: 0,
+        path: chunkPathFor(1),
+        bytes: 750,
+      },
+    ]);
+  });
+
+  it('re-splits oversized chunk output instead of failing the job', async () => {
     mockedRunCommand.mockResolvedValue('');
     mockedStat
       .mockResolvedValueOnce({ size: 750 } as Awaited<ReturnType<typeof stat>>)
       .mockResolvedValueOnce({
         size: 25_165_825,
-      } as Awaited<ReturnType<typeof stat>>);
+      } as Awaited<ReturnType<typeof stat>>)
+      .mockResolvedValue({ size: 900 } as Awaited<ReturnType<typeof stat>>);
 
-    await expect(
-      service.createDurationChunks({
-        recordingId: '550e8400-e29b-41d4-a716-446655440000',
-        normalizedPath: '/storage/normalized.mp3',
-        durationSeconds: 3600,
-      }),
-    ).rejects.toThrow('exceeds configured target size');
+    const chunks = await service.createChunks({
+      recordingId,
+      normalizedPath: '/storage/normalized.mp3',
+      durationSeconds: 3600,
+    });
 
-    expect(mockedRunCommand).toHaveBeenNthCalledWith(1, 'ffmpeg', [
-      '-y',
-      '-i',
-      '/storage/normalized.mp3',
-      '-ss',
-      '0',
-      '-to',
-      '2700',
-      '-c',
-      'copy',
-      '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000000.mp3',
-    ]);
-    expect(mockedRunCommand).toHaveBeenNthCalledWith(2, 'ffmpeg', [
-      '-y',
-      '-i',
-      '/storage/normalized.mp3',
-      '-ss',
-      '2700',
-      '-to',
-      '3600',
-      '-c',
-      'copy',
-      '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000001.mp3',
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      1,
+      'ffmpeg',
+      silencedetectArgs('/storage/normalized.mp3'),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      2,
+      'ffmpeg',
+      cutArgs(0, 2700, 0),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      3,
+      'ffmpeg',
+      cutArgs(2698, 3600, 1),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      4,
+      'ffmpeg',
+      cutArgs(2698, 3149, 1),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      5,
+      'ffmpeg',
+      cutArgs(3149, 3600, 2),
+    );
+    expect(chunks).toEqual([
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 2700,
+        overlapSeconds: 0,
+        path: chunkPathFor(0),
+        bytes: 750,
+      },
+      {
+        index: 1,
+        startSeconds: 2698,
+        endSeconds: 3149,
+        overlapSeconds: 2,
+        path: chunkPathFor(1),
+        bytes: 900,
+      },
+      {
+        index: 2,
+        startSeconds: 3149,
+        endSeconds: 3600,
+        overlapSeconds: 0,
+        path: chunkPathFor(2),
+        bytes: 900,
+      },
     ]);
   });
 
-  it('plans smaller chunks from a lowered chunk target before running ffmpeg', async () => {
+  it('fails when an oversized chunk is already too short to split', async () => {
     config.chunkTargetBytes = 16_000;
     mockedRunCommand.mockResolvedValue('');
     mockedStat.mockResolvedValue({
-      size: 8_000,
+      size: 16_001,
     } as Awaited<ReturnType<typeof stat>>);
 
-    await service.createDurationChunks({
-      recordingId: '550e8400-e29b-41d4-a716-446655440000',
-      normalizedPath: '/storage/normalized.mp3',
-      durationSeconds: 3,
-    });
-
-    expect(mockedRunCommand).toHaveBeenCalledTimes(3);
-    expect(mockedRunCommand).toHaveBeenNthCalledWith(1, 'ffmpeg', [
-      '-y',
-      '-i',
-      '/storage/normalized.mp3',
-      '-ss',
-      '0',
-      '-to',
-      '1',
-      '-c',
-      'copy',
-      '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000000.mp3',
-    ]);
-    expect(mockedRunCommand).toHaveBeenNthCalledWith(2, 'ffmpeg', [
-      '-y',
-      '-i',
-      '/storage/normalized.mp3',
-      '-ss',
-      '1',
-      '-to',
-      '2',
-      '-c',
-      'copy',
-      '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000001.mp3',
-    ]);
-    expect(mockedRunCommand).toHaveBeenNthCalledWith(3, 'ffmpeg', [
-      '-y',
-      '-i',
-      '/storage/normalized.mp3',
-      '-ss',
-      '2',
-      '-to',
-      '3',
-      '-c',
-      'copy',
-      '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000002.mp3',
-    ]);
+    await expect(
+      service.createChunks({
+        recordingId,
+        normalizedPath: '/storage/normalized.mp3',
+        durationSeconds: 3,
+      }),
+    ).rejects.toThrow('cannot be split further');
   });
 
   it('resolves from the Nest audio module', async () => {

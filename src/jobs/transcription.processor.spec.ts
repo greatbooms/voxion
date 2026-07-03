@@ -43,6 +43,7 @@ describe('TranscriptionProcessor', () => {
         endSeconds: 60.5,
         path: '/storage/chunks/000000.mp3',
         bytes: 1024,
+        overlapSeconds: 0,
       },
       {
         index: 1,
@@ -50,13 +51,14 @@ describe('TranscriptionProcessor', () => {
         endSeconds: 121.25,
         path: '/storage/chunks/000001.mp3',
         bytes: 2048,
+        overlapSeconds: 0,
       },
     ];
 
     prisma.recording.findUnique.mockResolvedValue(recording);
     audio.probeDurationSeconds.mockResolvedValue(121.25);
     storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
-    audio.createDurationChunks.mockResolvedValue(chunks);
+    audio.createChunks.mockResolvedValue(chunks);
     storage.chunkTranscriptPath.mockImplementation(
       (_recordingId: string, index: number) =>
         `/storage/transcripts/chunks/${index}.json`,
@@ -126,6 +128,7 @@ describe('TranscriptionProcessor', () => {
         bytes: BigInt(chunks[0].bytes),
         startSeconds: chunks[0].startSeconds,
         endSeconds: chunks[0].endSeconds,
+        overlapSeconds: 0,
       },
     });
     expect(prisma.recordingChunk.create).toHaveBeenNthCalledWith(2, {
@@ -137,6 +140,7 @@ describe('TranscriptionProcessor', () => {
         bytes: BigInt(chunks[1].bytes),
         startSeconds: chunks[1].startSeconds,
         endSeconds: chunks[1].endSeconds,
+        overlapSeconds: 0,
       },
     });
     expect(prisma.recordingChunk.upsert).not.toHaveBeenCalled();
@@ -164,10 +168,13 @@ describe('TranscriptionProcessor', () => {
         text: ' Hello chunk one ',
       },
     });
-    expect(merge.merge).toHaveBeenCalledWith([
-      { ...chunks[0], text: ' Hello chunk one ' },
-      { ...chunks[1], text: 'Hello chunk two' },
-    ]);
+    expect(merge.merge).toHaveBeenCalledWith(
+      [
+        { ...chunks[0], text: ' Hello chunk one ' },
+        { ...chunks[1], text: 'Hello chunk two' },
+      ],
+      { language: recording.language },
+    );
     expect(mockedWriteFile).toHaveBeenNthCalledWith(
       3,
       '/storage/transcripts/final.json',
@@ -193,10 +200,15 @@ describe('TranscriptionProcessor', () => {
       fileSizeMb: Number(recording.originalBytes) / 1024 / 1024,
       chunkCount: chunks.length,
       recordedAt: recording.recordedAt,
+      recordingId: recording.id,
     });
     expect(notion.appendTranscriptToPage).toHaveBeenCalledWith({
       pageId: 'notion-page-id',
       transcript: 'Hello chunk one\n\nHello chunk two',
+      chunks: [
+        { index: 0, startSeconds: 0, endSeconds: 60.5 },
+        { index: 1, startSeconds: 60.5, endSeconds: 121.25 },
+      ],
     });
     const createOrder =
       notion.createRecordingPageMetadata.mock.invocationCallOrder[0];
@@ -236,13 +248,14 @@ describe('TranscriptionProcessor', () => {
     prisma.recording.findUnique.mockResolvedValue(recording);
     audio.probeDurationSeconds.mockResolvedValue(20);
     storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
-    audio.createDurationChunks.mockResolvedValue([
+    audio.createChunks.mockResolvedValue([
       {
         index: 0,
         startSeconds: 0,
         endSeconds: 20,
         path: '/storage/chunks/000000.mp3',
         bytes: 512,
+        overlapSeconds: 0,
       },
     ]);
     openai.transcribe.mockRejectedValue(failure);
@@ -299,6 +312,7 @@ describe('TranscriptionProcessor', () => {
         endSeconds: 30,
         path: '/storage/chunks/000000.mp3',
         bytes: 1000,
+        overlapSeconds: 0,
       },
       {
         index: 1,
@@ -306,13 +320,14 @@ describe('TranscriptionProcessor', () => {
         endSeconds: 60,
         path: '/storage/chunks/000001.mp3',
         bytes: 2000,
+        overlapSeconds: 0,
       },
     ];
 
     prisma.recording.findUnique.mockResolvedValue(recording);
     audio.probeDurationSeconds.mockResolvedValue(60);
     storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
-    audio.createDurationChunks.mockResolvedValue(chunks);
+    audio.createChunks.mockResolvedValue(chunks);
     prisma.recordingChunk.findUnique
       .mockResolvedValueOnce({
         recordingId: recording.id,
@@ -363,10 +378,13 @@ describe('TranscriptionProcessor', () => {
       path: chunks[1].path,
       language: recording.language,
     });
-    expect(merge.merge).toHaveBeenCalledWith([
-      { ...chunks[0], text: 'Stored completed text' },
-      { ...chunks[1], text: 'Fresh retry text' },
-    ]);
+    expect(merge.merge).toHaveBeenCalledWith(
+      [
+        { ...chunks[0], text: 'Stored completed text' },
+        { ...chunks[1], text: 'Fresh retry text' },
+      ],
+      { language: recording.language },
+    );
     expect(storage.chunkTranscriptPath).toHaveBeenCalledTimes(1);
     expect(storage.chunkTranscriptPath).toHaveBeenCalledWith(recording.id, 1);
   });
@@ -382,6 +400,7 @@ describe('TranscriptionProcessor', () => {
         endSeconds: 45,
         path: '/storage/chunks/000000-new.mp3',
         bytes: 1500,
+        overlapSeconds: 0,
       },
     ];
     const staleCompletedChunk = {
@@ -399,7 +418,7 @@ describe('TranscriptionProcessor', () => {
     prisma.recording.findUnique.mockResolvedValue(recording);
     audio.probeDurationSeconds.mockResolvedValue(45);
     storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
-    audio.createDurationChunks.mockResolvedValue(chunks);
+    audio.createChunks.mockResolvedValue(chunks);
     prisma.recordingChunk.findUnique.mockResolvedValueOnce(staleCompletedChunk);
     storage.chunkTranscriptPath.mockReturnValue(
       '/storage/transcripts/chunks/0-new.json',
@@ -430,6 +449,7 @@ describe('TranscriptionProcessor', () => {
         bytes: BigInt(chunks[0].bytes),
         startSeconds: chunks[0].startSeconds,
         endSeconds: chunks[0].endSeconds,
+        overlapSeconds: 0,
         transcriptPath: null,
         text: null,
         errorCode: null,
@@ -441,9 +461,10 @@ describe('TranscriptionProcessor', () => {
       path: chunks[0].path,
       language: recording.language,
     });
-    expect(merge.merge).toHaveBeenCalledWith([
-      { ...chunks[0], text: 'Fresh boundary text' },
-    ]);
+    expect(merge.merge).toHaveBeenCalledWith(
+      [{ ...chunks[0], text: 'Fresh boundary text' }],
+      { language: recording.language },
+    );
   });
 
   it('reuses existing Notion page on retry instead of creating another page', async () => {
@@ -460,13 +481,14 @@ describe('TranscriptionProcessor', () => {
         endSeconds: 20,
         path: '/storage/chunks/000000.mp3',
         bytes: 1000,
+        overlapSeconds: 0,
       },
     ];
 
     prisma.recording.findUnique.mockResolvedValue(recording);
     audio.probeDurationSeconds.mockResolvedValue(20);
     storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
-    audio.createDurationChunks.mockResolvedValue(chunks);
+    audio.createChunks.mockResolvedValue(chunks);
     openai.transcribe.mockResolvedValue({
       text: 'Retry transcript',
       raw: { retry: true },
@@ -483,15 +505,147 @@ describe('TranscriptionProcessor', () => {
     ).resolves.toBeUndefined();
 
     expect(notion.createRecordingPageMetadata).not.toHaveBeenCalled();
+    expect(notion.findRecordingPage).not.toHaveBeenCalled();
     expect(notion.appendTranscriptToPage).toHaveBeenCalledWith({
       pageId: 'existing-page-id',
       transcript: 'Retry transcript',
+      chunks: [{ index: 0, startSeconds: 0, endSeconds: 20 }],
     });
     expect(
       prisma.recording.update.mock.calls.some(
         ([input]) => input.data.notionPageId === 'existing-page-id',
       ),
     ).toBe(false);
+  });
+
+  it('requeues the recording instead of failing it while retries remain', async () => {
+    const { processor, prisma, audio, storage, openai } = createHarness();
+    const recording = createRecording();
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(20);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createChunks.mockResolvedValue([
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 20,
+        path: '/storage/chunks/000000.mp3',
+        bytes: 512,
+        overlapSeconds: 0,
+      },
+    ]);
+    openai.transcribe.mockRejectedValue(new Error('OpenAI hiccup'));
+
+    await expect(
+      processor.process(
+        createJob({
+          attemptsMade: 0,
+          opts: { attempts: 3 },
+          data: { recordingId: recording.id },
+        } as any),
+      ),
+    ).rejects.toThrow('OpenAI hiccup');
+
+    expect(prisma.recording.update).toHaveBeenLastCalledWith({
+      where: { id: recording.id },
+      data: {
+        status: 'QUEUED',
+        errorCode: 'PROCESSING_FAILED',
+        errorMessage: 'OpenAI hiccup',
+      },
+    });
+    expect(prisma.jobRun.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'QUEUED' }),
+      }),
+    );
+  });
+
+  it('marks the recording failed on the final retry attempt', async () => {
+    const { processor, prisma, audio, storage, openai } = createHarness();
+    const recording = createRecording();
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(20);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createChunks.mockResolvedValue([
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 20,
+        path: '/storage/chunks/000000.mp3',
+        bytes: 512,
+        overlapSeconds: 0,
+      },
+    ]);
+    openai.transcribe.mockRejectedValue(new Error('OpenAI down'));
+
+    await expect(
+      processor.process(
+        createJob({
+          attemptsMade: 2,
+          opts: { attempts: 3 },
+          data: { recordingId: recording.id },
+        } as any),
+      ),
+    ).rejects.toThrow('OpenAI down');
+
+    expect(prisma.recording.update).toHaveBeenLastCalledWith({
+      where: { id: recording.id },
+      data: {
+        status: 'FAILED',
+        errorCode: 'PROCESSING_FAILED',
+        errorMessage: 'OpenAI down',
+      },
+    });
+  });
+
+  it('adopts a Notion page found by recording id after a crash between create and persist', async () => {
+    const { processor, prisma, audio, storage, openai, merge, notion } =
+      createHarness();
+    const recording = createRecording();
+    const chunks = [
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 20,
+        path: '/storage/chunks/000000.mp3',
+        bytes: 1000,
+        overlapSeconds: 0,
+      },
+    ];
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(20);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createChunks.mockResolvedValue(chunks);
+    openai.transcribe.mockResolvedValue({ text: 'Recovered', raw: {} });
+    merge.merge.mockReturnValue({
+      text: 'Recovered',
+      chunks: [{ ...chunks[0], text: 'Recovered' }],
+    });
+    storage.chunkTranscriptPath.mockReturnValue('/storage/transcripts/chunks/0.json');
+    storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
+    notion.findRecordingPage.mockResolvedValue({
+      pageId: 'orphaned-page-id',
+      url: 'https://notion.test/orphaned-page',
+    });
+
+    await expect(
+      processor.process(createJob({ data: { recordingId: recording.id } })),
+    ).resolves.toBeUndefined();
+
+    expect(notion.findRecordingPage).toHaveBeenCalledWith(recording.id);
+    expect(notion.createRecordingPageMetadata).not.toHaveBeenCalled();
+    expect(
+      prisma.recording.update.mock.calls.some(
+        ([input]) => input.data.notionPageId === 'orphaned-page-id',
+      ),
+    ).toBe(true);
+    expect(notion.appendTranscriptToPage).toHaveBeenCalledWith(
+      expect.objectContaining({ pageId: 'orphaned-page-id' }),
+    );
   });
 
   it('logs a warning when no job run row is updated', async () => {
@@ -570,7 +724,7 @@ function createHarness() {
   const audio = {
     probeDurationSeconds: jest.fn(),
     normalizeToMp3: jest.fn(),
-    createDurationChunks: jest.fn(),
+    createChunks: jest.fn(),
   };
   const storage = {
     normalizedPath: jest.fn(),
@@ -588,6 +742,7 @@ function createHarness() {
     createRecordingPage: jest.fn(),
     createRecordingPageMetadata: jest.fn(),
     appendTranscriptToPage: jest.fn(),
+    findRecordingPage: jest.fn().mockResolvedValue(null),
   };
   const processor = new (TranscriptionProcessor as any)(
     prisma as any,

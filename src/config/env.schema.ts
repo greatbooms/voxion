@@ -23,7 +23,7 @@ export const envSchema = z.object({
   NOTION_VERSION: z.string().default('2026-03-11'),
   STORAGE_ROOT: z.string().default('./storage'),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(2147483648),
-  CHUNK_TARGET_BYTES: z.coerce.number().int().positive().default(24000000),
+  CHUNK_TARGET_BYTES: z.coerce.number().int().positive().default(25165824),
   PORT: z.coerce.number().int().positive().max(65535).default(3000),
 });
 

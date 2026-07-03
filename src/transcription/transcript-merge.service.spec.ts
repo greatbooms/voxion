@@ -95,7 +95,7 @@ describe('TranscriptMergeService', () => {
     expect(chunks.map((chunk) => chunk.index)).toEqual([2, 0, 1]);
   });
 
-  it('collapses whitespace without adding sentence breaks', () => {
+  it('collapses whitespace while keeping short sentences in one paragraph', () => {
     const result = service.merge([
       {
         index: 0,
@@ -105,6 +105,49 @@ describe('TranscriptMergeService', () => {
 
     expect(result.text).toBe(
       '첫 문장입니다. 두 문장입니다. Third sentence. Fourth?',
+    );
+  });
+
+  it('segments long chunk text into readable paragraphs at sentence boundaries', () => {
+    const sentence = '이 문장은 충분히 길어서 문단 분할 기준을 검증할 수 있습니다.';
+    const sentences = Array.from({ length: 40 }, () => sentence);
+    const result = service.merge(
+      [{ index: 0, text: sentences.join(' ') }],
+      { language: 'ko' },
+    );
+    const paragraphs = result.text.split('\n\n');
+
+    expect(paragraphs.length).toBeGreaterThan(1);
+
+    for (const paragraph of paragraphs) {
+      expect(paragraph.length).toBeLessThanOrEqual(500);
+      expect(paragraph.endsWith('.')).toBe(true);
+    }
+
+    expect(paragraphs.join(' ')).toBe(sentences.join(' '));
+  });
+
+  it('keeps a single oversized sentence intact in its own paragraph', () => {
+    const longSentence = `${'가나다라 '.repeat(200)}끝입니다.`;
+    const normalized = longSentence.replace(/\s+/g, ' ').trim();
+    const result = service.merge([{ index: 0, text: longSentence }], {
+      language: 'ko',
+    });
+
+    expect(result.text.split('\n\n')).toContain(normalized);
+  });
+
+  it('separates chunk transcripts into distinct paragraphs', () => {
+    const result = service.merge(
+      [
+        { index: 0, text: 'First chunk sentence.' },
+        { index: 1, text: 'Second chunk sentence.' },
+      ],
+      { language: 'en' },
+    );
+
+    expect(result.text).toBe(
+      'First chunk sentence.\n\nSecond chunk sentence.',
     );
   });
 
