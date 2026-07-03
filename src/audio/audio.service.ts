@@ -45,10 +45,11 @@ export class AudioService {
       'default=noprint_wrappers=1:nokey=1',
       path,
     ]);
-    const durationSeconds = Number.parseFloat(output.trim());
+    const trimmedOutput = output.trim();
+    const durationSeconds = Number(trimmedOutput);
 
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-      throw new Error(`Invalid ffprobe duration: ${output.trim()}`);
+      throw new Error(`Invalid ffprobe duration: ${trimmedOutput}`);
     }
 
     return durationSeconds;
@@ -69,8 +70,8 @@ export class AudioService {
   }
 
   planDurationChunks(input: PlanDurationChunksInput): PlannedChunk[] {
-    this.assertPositiveFinite(input.durationSeconds, 'durationSeconds');
-    this.assertPositiveFinite(input.maxChunkSeconds, 'maxChunkSeconds');
+    this.assertPositiveSafeInteger(input.durationSeconds, 'durationSeconds');
+    this.assertPositiveSafeInteger(input.maxChunkSeconds, 'maxChunkSeconds');
 
     const chunks: PlannedChunk[] = [];
     let startSeconds = 0;
@@ -80,6 +81,10 @@ export class AudioService {
         startSeconds + input.maxChunkSeconds,
         input.durationSeconds,
       );
+
+      if (endSeconds <= startSeconds) {
+        throw new Error('Invalid chunk boundary');
+      }
 
       chunks.push({
         index: chunks.length,
@@ -142,6 +147,12 @@ export class AudioService {
 
   private assertPositiveFinite(value: number, name: string): void {
     if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`Invalid ${name}`);
+    }
+  }
+
+  private assertPositiveSafeInteger(value: number, name: string): void {
+    if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`Invalid ${name}`);
     }
   }

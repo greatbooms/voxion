@@ -74,6 +74,36 @@ describe('AudioService', () => {
     );
   });
 
+  it('rejects malformed ffprobe duration output', async () => {
+    mockedRunCommand.mockResolvedValue('123abc\n');
+
+    await expect(service.probeDurationSeconds('/tmp/input.wav')).rejects.toThrow(
+      'Invalid ffprobe duration',
+    );
+
+    mockedRunCommand.mockResolvedValue('123\nunexpected\n');
+
+    await expect(service.probeDurationSeconds('/tmp/input.wav')).rejects.toThrow(
+      'Invalid ffprobe duration',
+    );
+  });
+
+  it('rejects fractional chunk planning inputs', () => {
+    expect(() =>
+      service.planDurationChunks({
+        durationSeconds: 60.5,
+        maxChunkSeconds: 30,
+      }),
+    ).toThrow('Invalid durationSeconds');
+
+    expect(() =>
+      service.planDurationChunks({
+        durationSeconds: 60,
+        maxChunkSeconds: 0.000001,
+      }),
+    ).toThrow('Invalid maxChunkSeconds');
+  });
+
   it('normalizes audio to mono 64k mp3 after ensuring the output parent exists', async () => {
     mockedRunCommand.mockResolvedValue('');
 
