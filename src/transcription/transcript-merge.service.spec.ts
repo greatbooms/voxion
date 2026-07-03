@@ -21,27 +21,66 @@ describe('TranscriptMergeService', () => {
     expect(service.merge([])).toEqual({ text: '', chunks: [] });
   });
 
-  it('preserves original chunk objects sorted by index', () => {
-    const second = { index: 1, text: 'Second.' };
-    const first = { index: 0, text: 'First.' };
+  it('preserves original chunk metadata sorted by index', () => {
+    const second = {
+      index: 1,
+      text: 'Second.',
+      startedAtMs: 1_000,
+      endedAtMs: 2_000,
+      sourcePath: '/tmp/chunks/chunk-1.wav',
+    };
+    const first = {
+      index: 0,
+      text: 'First.',
+      startedAtMs: 0,
+      endedAtMs: 1_000,
+      sourcePath: '/tmp/chunks/chunk-0.wav',
+    };
 
     const result = service.merge([second, first]);
 
     expect(result.chunks).toEqual([first, second]);
     expect(result.chunks[0]).toBe(first);
     expect(result.chunks[1]).toBe(second);
+    expect(result.chunks[0].startedAtMs).toBe(0);
+    expect(result.chunks[0].endedAtMs).toBe(1_000);
+    expect(result.chunks[0].sourcePath).toBe('/tmp/chunks/chunk-0.wav');
+    expect(result.chunks[1].startedAtMs).toBe(1_000);
+    expect(result.chunks[1].endedAtMs).toBe(2_000);
+    expect(result.chunks[1].sourcePath).toBe('/tmp/chunks/chunk-1.wav');
   });
 
-  it('trims and filters blank text while preserving blank chunks', () => {
-    const first = { index: 0, text: '  First.  ' };
-    const blank = { index: 1, text: '   ' };
-    const second = { index: 2, text: '\nSecond.\n' };
+  it('trims and filters blank text while preserving blank chunk metadata', () => {
+    const first = {
+      index: 0,
+      text: '  First.  ',
+      startedAtMs: 0,
+      endedAtMs: 1_000,
+      sourcePath: '/tmp/chunks/chunk-0.wav',
+    };
+    const blank = {
+      index: 1,
+      text: '   ',
+      startedAtMs: 1_000,
+      endedAtMs: 2_000,
+      sourcePath: '/tmp/chunks/chunk-1.wav',
+    };
+    const second = {
+      index: 2,
+      text: '\nSecond.\n',
+      startedAtMs: 2_000,
+      endedAtMs: 3_000,
+      sourcePath: '/tmp/chunks/chunk-2.wav',
+    };
 
     const result = service.merge([first, blank, second]);
 
     expect(result.text).toBe('First.\n\nSecond.');
     expect(result.chunks).toEqual([first, blank, second]);
     expect(result.chunks[1]).toBe(blank);
+    expect(result.chunks[1].startedAtMs).toBe(1_000);
+    expect(result.chunks[1].endedAtMs).toBe(2_000);
+    expect(result.chunks[1].sourcePath).toBe('/tmp/chunks/chunk-1.wav');
   });
 
   it('does not mutate the input array', () => {
@@ -56,13 +95,16 @@ describe('TranscriptMergeService', () => {
     expect(chunks.map((chunk) => chunk.index)).toEqual([2, 0, 1]);
   });
 
-  it('normalizes sentence breaks within each chunk', () => {
+  it('collapses whitespace without adding sentence breaks', () => {
     const result = service.merge([
-      { index: 0, text: '첫 문장입니다. 두 문장입니다.Third sentence. Fourth?' },
+      {
+        index: 0,
+        text: '  첫 문장입니다.   두 문장입니다.\nThird sentence.   Fourth?  ',
+      },
     ]);
 
     expect(result.text).toBe(
-      '첫 문장입니다.\n두 문장입니다.Third sentence.\nFourth?',
+      '첫 문장입니다. 두 문장입니다. Third sentence. Fourth?',
     );
   });
 
