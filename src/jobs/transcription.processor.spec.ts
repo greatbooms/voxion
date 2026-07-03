@@ -1,6 +1,13 @@
 import { writeFile } from 'node:fs/promises';
+import { MODULE_METADATA } from '@nestjs/common/constants';
 import { Job } from 'bullmq';
+import { AudioModule } from '../audio/audio.module';
+import { NotionModule } from '../notion/notion.module';
+import { PrismaModule } from '../prisma/prisma.module';
+import { StorageModule } from '../storage/storage.module';
+import { TranscriptionModule } from '../transcription/transcription.module';
 import { PROCESS_RECORDING_JOB } from './jobs.constants';
+import { JobsWorkerModule } from './jobs.module';
 import { TranscriptionProcessor } from './transcription.processor';
 
 jest.mock('node:fs/promises', () => ({
@@ -243,6 +250,25 @@ describe('TranscriptionProcessor', () => {
         lastError: 'OpenAI unavailable',
       },
     });
+  });
+});
+
+describe('JobsWorkerModule', () => {
+  it('imports the modules required by TranscriptionProcessor dependencies', () => {
+    const imports = Reflect.getMetadata(
+      MODULE_METADATA.IMPORTS,
+      JobsWorkerModule,
+    ) as unknown[];
+
+    expect(imports).toEqual(
+      expect.arrayContaining([
+        AudioModule,
+        NotionModule,
+        PrismaModule,
+        StorageModule,
+        TranscriptionModule,
+      ]),
+    );
   });
 });
 
