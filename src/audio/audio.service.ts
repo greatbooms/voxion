@@ -5,6 +5,8 @@ import { StorageService } from '../storage/storage.service';
 import { runCommand } from './ffmpeg-runner';
 
 const MAX_CHUNK_SECONDS = 45 * 60;
+const NORMALIZED_MP3_BYTES_PER_SECOND = 8_000;
+const CHUNK_TARGET_SAFETY_MARGIN = 0.9;
 
 export type PlannedChunk = {
   index: number;
@@ -106,14 +108,15 @@ export class AudioService {
   async createDurationChunks(
     input: CreateDurationChunksInput,
   ): Promise<CreatedChunk[]> {
-    const chunks = this.planDurationChunks({
-      durationSeconds: input.durationSeconds,
-      maxChunkSeconds: MAX_CHUNK_SECONDS,
-    });
-    const createdChunks: CreatedChunk[] = [];
     const chunkTargetBytes = this.config.chunkTargetBytes;
 
     this.assertPositiveFinite(chunkTargetBytes, 'chunkTargetBytes');
+
+    const chunks = this.planDurationChunks({
+      durationSeconds: input.durationSeconds,
+      maxChunkSeconds: this.maxChunkSecondsForTargetBytes(chunkTargetBytes),
+    });
+    const createdChunks: CreatedChunk[] = [];
 
     for (const chunk of chunks) {
       const path = this.storage.chunkPath(input.recordingId, chunk.index);
@@ -160,5 +163,16 @@ export class AudioService {
     if (!Number.isFinite(value) || value < 1) {
       throw new Error(`Invalid ${name}`);
     }
+  }
+
+  private maxChunkSecondsForTargetBytes(chunkTargetBytes: number): number {
+    const targetSeconds = Math.floor(
+      (chunkTargetBytes * CHUNK_TARGET_SAFETY_MARGIN) /
+        NORMALIZED_MP3_BYTES_PER_SECOND,
+    );
+
+    this.assertMinimumChunkSeconds(targetSeconds, 'maxChunkSeconds');
+
+    return Math.min(targetSeconds, MAX_CHUNK_SECONDS);
   }
 }

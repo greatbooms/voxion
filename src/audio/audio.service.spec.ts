@@ -18,7 +18,7 @@ const mockedRunCommand = jest.mocked(runCommand);
 const mockedStat = jest.mocked(stat);
 
 describe('AudioService', () => {
-  const config = { chunkTargetBytes: 1_000 };
+  const config = { chunkTargetBytes: 25_165_824 };
   const storage = {
     ensureParent: jest.fn(),
     chunkPath: jest.fn((recordingId: string, index: number) =>
@@ -30,6 +30,7 @@ describe('AudioService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    config.chunkTargetBytes = 25_165_824;
     service = new AudioService(
       config as AppConfigService,
       storage as unknown as StorageService,
@@ -142,7 +143,9 @@ describe('AudioService', () => {
     mockedRunCommand.mockResolvedValue('');
     mockedStat
       .mockResolvedValueOnce({ size: 750 } as Awaited<ReturnType<typeof stat>>)
-      .mockResolvedValueOnce({ size: 1_250 } as Awaited<ReturnType<typeof stat>>);
+      .mockResolvedValueOnce({
+        size: 25_165_825,
+      } as Awaited<ReturnType<typeof stat>>);
 
     await expect(
       service.createDurationChunks({
@@ -175,6 +178,58 @@ describe('AudioService', () => {
       '-c',
       'copy',
       '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000001.mp3',
+    ]);
+  });
+
+  it('plans smaller chunks from a lowered chunk target before running ffmpeg', async () => {
+    config.chunkTargetBytes = 16_000;
+    mockedRunCommand.mockResolvedValue('');
+    mockedStat.mockResolvedValue({
+      size: 8_000,
+    } as Awaited<ReturnType<typeof stat>>);
+
+    await service.createDurationChunks({
+      recordingId: '550e8400-e29b-41d4-a716-446655440000',
+      normalizedPath: '/storage/normalized.mp3',
+      durationSeconds: 3,
+    });
+
+    expect(mockedRunCommand).toHaveBeenCalledTimes(3);
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(1, 'ffmpeg', [
+      '-y',
+      '-i',
+      '/storage/normalized.mp3',
+      '-ss',
+      '0',
+      '-to',
+      '1',
+      '-c',
+      'copy',
+      '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000000.mp3',
+    ]);
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(2, 'ffmpeg', [
+      '-y',
+      '-i',
+      '/storage/normalized.mp3',
+      '-ss',
+      '1',
+      '-to',
+      '2',
+      '-c',
+      'copy',
+      '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000001.mp3',
+    ]);
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(3, 'ffmpeg', [
+      '-y',
+      '-i',
+      '/storage/normalized.mp3',
+      '-ss',
+      '2',
+      '-to',
+      '3',
+      '-c',
+      'copy',
+      '/storage/chunks/550e8400-e29b-41d4-a716-446655440000/000002.mp3',
     ]);
   });
 
