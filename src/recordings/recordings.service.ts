@@ -1,6 +1,8 @@
+import { unlink } from 'node:fs/promises';
 import {
   BadRequestException,
   Injectable,
+  NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
 import { ChunkStatus, Prisma, RecordingStatus } from '@prisma/client';
@@ -20,6 +22,12 @@ const SUPPORTED_MEDIA_MIME_TYPES = new Set([
 ]);
 
 const STORAGE_SAVE_FAILED_CODE = 'STORAGE_SAVE_FAILED';
+const FINALIZE_RECORDING_FAILED_CODE = 'FINALIZE_RECORDING_FAILED';
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ISO_DATETIME_WITH_TIMEZONE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?(Z|([+-])(\d{2}):(\d{2}))$/;
+const LANGUAGE_TAG_PATTERN = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
 
 type RecordingWithChunks = Prisma.RecordingGetPayload<{
   include: { chunks: true };
@@ -82,6 +90,7 @@ export class RecordingsService {
   ): Promise<{ recordingId: string; status: RecordingStatus }> {
     this.validateUpload(file);
     const recordedAt = this.parseRecordedAt(dto.recordedAt);
+    const language = this.parseLanguage(dto.language);
 
     const uploaded = await this.prisma.recording.create({
       data: {
@@ -91,7 +100,7 @@ export class RecordingsService {
         mimeType: file.mimetype,
         originalPath: '',
         originalBytes: BigInt(file.size),
-        language: dto.language ?? this.config.defaultTranscriptionLanguage,
+        language,
         model: this.config.openaiTranscriptionModel,
         recordedAt,
       },
@@ -118,13 +127,34 @@ export class RecordingsService {
       throw error;
     }
 
-    const recording = await this.prisma.recording.update({
-      where: { id: uploaded.id },
-      data: {
-        originalPath: saved.path,
-        status: RecordingStatus.QUEUED,
-      },
-    });
+    let recording: { id: string; status: RecordingStatus };
+
+    try {
+      recording = await this.prisma.recording.update({
+        where: { id: uploaded.id },
+        data: {
+          originalPath: saved.path,
+          status: RecordingStatus.QUEUED,
+        },
+      });
+    } catch (error) {
+      await this.removeSavedFile(saved.path);
+
+      try {
+        await this.prisma.recording.update({
+          where: { id: uploaded.id },
+          data: {
+            status: RecordingStatus.FAILED,
+            errorCode: FINALIZE_RECORDING_FAILED_CODE,
+            errorMessage: this.errorMessage(error),
+          },
+        });
+      } catch {
+        // Preserve the original finalize failure after best-effort recovery.
+      }
+
+      throw error;
+    }
 
     return {
       recordingId: recording.id,
@@ -133,10 +163,18 @@ export class RecordingsService {
   }
 
   async findOne(id: string): Promise<RecordingResponse> {
-    const recording = await this.prisma.recording.findUniqueOrThrow({
+    if (!UUID_PATTERN.test(id)) {
+      throw new BadRequestException('Recording id must be a valid UUID.');
+    }
+
+    const recording = await this.prisma.recording.findUnique({
       where: { id },
       include: { chunks: { orderBy: { index: 'asc' } } },
     });
+
+    if (!recording) {
+      throw new NotFoundException('Recording not found.');
+    }
 
     return this.toRecordingResponse(recording);
   }
@@ -161,26 +199,97 @@ export class RecordingsService {
     }
   }
 
-  private parseRecordedAt(recordedAt?: string): Date {
+  private parseRecordedAt(recordedAt: unknown): Date {
     if (recordedAt === undefined) {
       return new Date();
     }
 
-    if (recordedAt.trim() === '') {
+    if (typeof recordedAt !== 'string' || recordedAt.trim() === '') {
       throw new BadRequestException(
-        'recordedAt must be a valid ISO date string.',
+        'recordedAt must be a strict ISO-8601 datetime with timezone.',
       );
     }
 
-    const parsed = new Date(recordedAt);
+    const match = ISO_DATETIME_WITH_TIMEZONE.exec(recordedAt);
 
-    if (Number.isNaN(parsed.getTime())) {
+    if (!match) {
       throw new BadRequestException(
-        'recordedAt must be a valid ISO date string.',
+        'recordedAt must be a strict ISO-8601 datetime with timezone.',
+      );
+    }
+
+    const [
+      ,
+      yearValue,
+      monthValue,
+      dayValue,
+      hourValue,
+      minuteValue,
+      secondValue,
+      millisecondValue,
+      ,
+      ,
+      offsetHourValue,
+      offsetMinuteValue,
+    ] = match;
+    const year = Number(yearValue);
+    const month = Number(monthValue);
+    const day = Number(dayValue);
+    const hour = Number(hourValue);
+    const minute = Number(minuteValue);
+    const second = Number(secondValue);
+    const millisecond = Number((millisecondValue ?? '0').padEnd(3, '0'));
+    const offsetHour =
+      offsetHourValue === undefined ? 0 : Number(offsetHourValue);
+    const offsetMinute =
+      offsetMinuteValue === undefined ? 0 : Number(offsetMinuteValue);
+    const componentDate = new Date(
+      Date.UTC(year, month - 1, day, hour, minute, second, millisecond),
+    );
+    const parsed = new Date(recordedAt);
+    const hasValidComponents =
+      componentDate.getUTCFullYear() === year &&
+      componentDate.getUTCMonth() === month - 1 &&
+      componentDate.getUTCDate() === day &&
+      componentDate.getUTCHours() === hour &&
+      componentDate.getUTCMinutes() === minute &&
+      componentDate.getUTCSeconds() === second &&
+      componentDate.getUTCMilliseconds() === millisecond &&
+      offsetHour <= 23 &&
+      offsetMinute <= 59 &&
+      !Number.isNaN(parsed.getTime());
+
+    if (!hasValidComponents) {
+      throw new BadRequestException(
+        'recordedAt must be a strict ISO-8601 datetime with timezone.',
       );
     }
 
     return parsed;
+  }
+
+  private parseLanguage(language: unknown): string {
+    if (language === undefined) {
+      return this.config.defaultTranscriptionLanguage;
+    }
+
+    if (
+      typeof language !== 'string' ||
+      language.trim() === '' ||
+      !LANGUAGE_TAG_PATTERN.test(language)
+    ) {
+      throw new BadRequestException('language must be a valid language tag.');
+    }
+
+    return language;
+  }
+
+  private async removeSavedFile(path: string): Promise<void> {
+    try {
+      await unlink(path);
+    } catch {
+      // Best effort cleanup only.
+    }
   }
 
   private errorMessage(error: unknown): string {
