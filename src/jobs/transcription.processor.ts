@@ -194,25 +194,40 @@ export class TranscriptionProcessor extends WorkerHost {
         },
       });
 
-      const notionPage = await this.notion.createRecordingPage({
-        title: recording.title || recording.originalFilename,
-        status: 'Completed',
-        language: recording.language,
-        model: recording.model,
-        durationSeconds,
-        originalFilename: recording.originalFilename,
-        fileSizeMb: Number(recording.originalBytes) / 1024 / 1024,
-        chunkCount: chunks.length,
+      const notionPage =
+        recording.notionPageId
+          ? { pageId: recording.notionPageId, url: recording.notionUrl ?? '' }
+          : await this.notion.createRecordingPageMetadata({
+              title: recording.title || recording.originalFilename,
+              status: 'Completed',
+              language: recording.language,
+              model: recording.model,
+              durationSeconds,
+              originalFilename: recording.originalFilename,
+              fileSizeMb: Number(recording.originalBytes) / 1024 / 1024,
+              chunkCount: chunks.length,
+              recordedAt: recording.recordedAt ?? undefined,
+            });
+
+      if (!recording.notionPageId) {
+        await this.prisma.recording.update({
+          where: { id: recordingId },
+          data: {
+            notionPageId: notionPage.pageId,
+            notionUrl: notionPage.url,
+          },
+        });
+      }
+
+      await this.notion.appendTranscriptToPage({
+        pageId: notionPage.pageId,
         transcript: merged.text,
-        recordedAt: recording.recordedAt ?? undefined,
       });
 
       await this.prisma.recording.update({
         where: { id: recordingId },
         data: {
           status: 'COMPLETED',
-          notionPageId: notionPage.pageId,
-          notionUrl: notionPage.url,
           completedAt: new Date(),
         },
       });

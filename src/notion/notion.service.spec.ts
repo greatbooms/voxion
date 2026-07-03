@@ -50,17 +50,16 @@ describe('NotionService', () => {
     );
   });
 
-  it('creates a page, appends transcript blocks in batches, and returns page details', async () => {
+  it('creates a page metadata payload and returns page details', async () => {
     const create = jest.fn().mockResolvedValue({
       id: 'page-id',
       url: 'https://notion.so/page-id',
     });
-    const append = jest.fn().mockResolvedValue({});
     MockedClient.mockImplementation(
       () =>
         ({
           pages: { create },
-          blocks: { children: { append } },
+          blocks: { children: {} },
         }) as unknown as Client,
     );
     const service = new NotionService({
@@ -68,14 +67,9 @@ describe('NotionService', () => {
       notionDataSourceId: 'data-source-id',
       notionVersion: '2022-06-28',
     } as AppConfigService);
-    const transcript = Array.from(
-      { length: 250 },
-      (_, index) => `Paragraph ${index + 1}`,
-    ).join('\n\n');
 
-    const result = await service.createRecordingPage({
+    const result = await service.createRecordingPageMetadata({
       ...input,
-      transcript,
       durationSeconds: 12.5,
       recordedAt: new Date('2026-07-03T01:02:03.000Z'),
     });
@@ -103,6 +97,76 @@ describe('NotionService', () => {
         }),
       }),
     );
+    expect(result).toEqual({
+      pageId: 'page-id',
+      url: 'https://notion.so/page-id',
+    });
+  });
+
+  it('appends only missing transcript paragraph blocks in batches', async () => {
+    const list = jest
+      .fn()
+      .mockResolvedValueOnce({
+        results: [
+          {
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [{ type: 'text', text: { content: 'Paragraph 1' } }],
+            },
+          },
+          {
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [{ type: 'text', text: { content: 'Paragraph 2' } }],
+            },
+          },
+        ],
+        has_more: true,
+        next_cursor: 'cursor-2',
+      })
+      .mockResolvedValueOnce({
+        results: [
+          {
+            object: 'block',
+            type: 'paragraph',
+            paragraph: {
+              rich_text: [{ type: 'text', text: { content: 'Paragraph 3' } }],
+            },
+          },
+        ],
+        has_more: false,
+        next_cursor: null,
+      });
+    const append = jest.fn().mockResolvedValue({});
+    MockedClient.mockImplementation(
+      () =>
+        ({
+          blocks: { children: { append, list } },
+        }) as unknown as Client,
+    );
+    const service = new NotionService({
+      notionToken: 'notion-token',
+      notionDataSourceId: 'data-source-id',
+      notionVersion: '2022-06-28',
+    } as AppConfigService);
+    const transcript = Array.from(
+      { length: 205 },
+      (_, index) => `Paragraph ${index + 1}`,
+    ).join('\n\n');
+
+    await service.appendTranscriptToPage({ pageId: 'page-id', transcript });
+
+    expect(list).toHaveBeenNthCalledWith(1, {
+      block_id: 'page-id',
+      page_size: 100,
+    });
+    expect(list).toHaveBeenNthCalledWith(2, {
+      block_id: 'page-id',
+      page_size: 100,
+      start_cursor: 'cursor-2',
+    });
     expect(append).toHaveBeenCalledTimes(3);
     expect(append).toHaveBeenNthCalledWith(1, {
       block_id: 'page-id',
@@ -110,14 +174,48 @@ describe('NotionService', () => {
         expect.objectContaining({
           type: 'paragraph',
           paragraph: {
-            rich_text: [{ type: 'text', text: { content: 'Paragraph 1' } }],
+            rich_text: [{ type: 'text', text: { content: 'Paragraph 4' } }],
           },
         }),
       ]),
     });
     expect(append.mock.calls[0][0].children).toHaveLength(100);
     expect(append.mock.calls[1][0].children).toHaveLength(100);
-    expect(append.mock.calls[2][0].children).toHaveLength(50);
+    expect(append.mock.calls[2][0].children).toHaveLength(2);
+  });
+
+  it('keeps createRecordingPage backwards-compatible', async () => {
+    const create = jest.fn().mockResolvedValue({
+      id: 'page-id',
+      url: 'https://notion.so/page-id',
+    });
+    const list = jest.fn().mockResolvedValue({
+      results: [],
+      has_more: false,
+      next_cursor: null,
+    });
+    const append = jest.fn().mockResolvedValue({});
+    MockedClient.mockImplementation(
+      () =>
+        ({
+          pages: { create },
+          blocks: { children: { append, list } },
+        }) as unknown as Client,
+    );
+    const service = new NotionService({
+      notionToken: 'notion-token',
+      notionDataSourceId: 'data-source-id',
+      notionVersion: '2022-06-28',
+    } as AppConfigService);
+
+    const result = await service.createRecordingPage(input);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledWith({
+      block_id: 'page-id',
+      page_size: 100,
+    });
+    expect(append).toHaveBeenCalledTimes(1);
     expect(result).toEqual({
       pageId: 'page-id',
       url: 'https://notion.so/page-id',

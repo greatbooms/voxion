@@ -4,6 +4,8 @@ import type {
   AppendBlockChildrenParameters,
   CreatePageParameters,
   CreatePageResponse,
+  ListBlockChildrenParameters,
+  ListBlockChildrenResponse,
 } from '@notionhq/client/build/src/api-endpoints';
 import { AppConfigService } from '../config/app-config.service';
 import {
@@ -33,12 +35,34 @@ export type CreateRecordingPageResult = {
   url: string;
 };
 
+export type CreateRecordingPageMetadataInput = Omit<
+  CreateRecordingPageInput,
+  'transcript'
+>;
+
+export type AppendTranscriptToPageInput = {
+  pageId: string;
+  transcript: string;
+};
+
 @Injectable()
 export class NotionService {
   constructor(private readonly config: AppConfigService) {}
 
   async createRecordingPage(
     input: CreateRecordingPageInput,
+  ): Promise<CreateRecordingPageResult> {
+    const page = await this.createRecordingPageMetadata(input);
+    await this.appendTranscriptToPage({
+      pageId: page.pageId,
+      transcript: input.transcript,
+    });
+
+    return page;
+  }
+
+  async createRecordingPageMetadata(
+    input: CreateRecordingPageMetadataInput,
   ): Promise<CreateRecordingPageResult> {
     const token = this.config.notionToken;
     const dataSourceId = this.config.notionDataSourceId;
@@ -58,21 +82,39 @@ export class NotionService {
       this.buildCreatePageParameters(input, dataSourceId, uploadedAt),
     );
 
-    for (const batch of batchBlocks(
-      splitTranscriptIntoParagraphBlocks(input.transcript),
-      100,
-    )) {
-      await notion.blocks.children.append({
-        block_id: page.id,
-        children: batch as AppendBlockChildrenParameters['children'],
-      });
-    }
-
     return { pageId: page.id, url: getPageUrl(page) };
   }
 
+  async appendTranscriptToPage(input: AppendTranscriptToPageInput): Promise<void> {
+    const token = this.config.notionToken;
+
+    if (!token) {
+      throw new PreconditionFailedException(
+        'Notion environment is not configured.',
+      );
+    }
+
+    const notion = new Client({
+      auth: token,
+      notionVersion: this.config.notionVersion,
+    });
+    const transcriptBlocks = splitTranscriptIntoParagraphBlocks(input.transcript);
+    const existingParagraphCount = await this.countExistingParagraphChildren(
+      notion,
+      input.pageId,
+    );
+    const missingBlocks = transcriptBlocks.slice(existingParagraphCount);
+
+    for (const batch of batchBlocks(missingBlocks, 100)) {
+      await notion.blocks.children.append({
+        block_id: input.pageId,
+        children: batch as AppendBlockChildrenParameters['children'],
+      });
+    }
+  }
+
   private buildCreatePageParameters(
-    input: CreateRecordingPageInput,
+    input: CreateRecordingPageMetadataInput,
     dataSourceId: string,
     uploadedAt: string,
   ): CreatePageParameters {
@@ -117,6 +159,33 @@ export class NotionService {
       },
     };
   }
+
+  private async countExistingParagraphChildren(
+    notion: Client,
+    pageId: string,
+  ): Promise<number> {
+    let startCursor: string | undefined;
+    let paragraphCount = 0;
+
+    do {
+      const request: ListBlockChildrenParameters = {
+        block_id: pageId,
+        page_size: 100,
+        ...(startCursor ? { start_cursor: startCursor } : {}),
+      };
+      const response = (await notion.blocks.children.list(
+        request,
+      )) as ListBlockChildrenResponse;
+
+      paragraphCount += response.results.filter(isParagraphBlock).length;
+      startCursor =
+        response.has_more && response.next_cursor
+          ? response.next_cursor
+          : undefined;
+    } while (startCursor);
+
+    return paragraphCount;
+  }
 }
 
 function toIsoString(value: Date | string): string {
@@ -125,4 +194,8 @@ function toIsoString(value: Date | string): string {
 
 function getPageUrl(page: CreatePageResponse): string {
   return 'url' in page && typeof page.url === 'string' ? page.url : '';
+}
+
+function isParagraphBlock(block: ListBlockChildrenResponse['results'][number]) {
+  return 'type' in block && block.type === 'paragraph';
 }

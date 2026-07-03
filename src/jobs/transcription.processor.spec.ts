@@ -72,7 +72,7 @@ describe('TranscriptionProcessor', () => {
       ],
     });
     storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
-    notion.createRecordingPage.mockResolvedValue({
+    notion.createRecordingPageMetadata.mockResolvedValue({
       pageId: 'notion-page-id',
       url: 'https://notion.test/page',
     });
@@ -175,7 +175,7 @@ describe('TranscriptionProcessor', () => {
         2,
       ),
     );
-    expect(notion.createRecordingPage).toHaveBeenCalledWith({
+    expect(notion.createRecordingPageMetadata).toHaveBeenCalledWith({
       title: recording.title,
       status: 'Completed',
       language: recording.language,
@@ -184,15 +184,28 @@ describe('TranscriptionProcessor', () => {
       originalFilename: recording.originalFilename,
       fileSizeMb: Number(recording.originalBytes) / 1024 / 1024,
       chunkCount: chunks.length,
-      transcript: 'Hello chunk one\n\nHello chunk two',
       recordedAt: recording.recordedAt,
     });
+    expect(notion.appendTranscriptToPage).toHaveBeenCalledWith({
+      pageId: 'notion-page-id',
+      transcript: 'Hello chunk one\n\nHello chunk two',
+    });
+    const createOrder =
+      notion.createRecordingPageMetadata.mock.invocationCallOrder[0];
+    const persistOrder = prisma.recording.update.mock.calls.findIndex(
+      ([input]) => input.data.notionPageId === 'notion-page-id',
+    );
+    const appendOrder = notion.appendTranscriptToPage.mock.invocationCallOrder[0];
+    expect(createOrder).toBeLessThan(
+      prisma.recording.update.mock.invocationCallOrder[persistOrder],
+    );
+    expect(
+      prisma.recording.update.mock.invocationCallOrder[persistOrder],
+    ).toBeLessThan(appendOrder);
     expect(prisma.recording.update).toHaveBeenLastCalledWith({
       where: { id: recording.id },
       data: {
         status: 'COMPLETED',
-        notionPageId: 'notion-page-id',
-        notionUrl: 'https://notion.test/page',
         completedAt: expect.any(Date),
       },
     });
@@ -328,7 +341,7 @@ describe('TranscriptionProcessor', () => {
       ],
     });
     storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
-    notion.createRecordingPage.mockResolvedValue({
+    notion.createRecordingPageMetadata.mockResolvedValue({
       pageId: 'notion-page-id',
       url: 'https://notion.test/page',
     });
@@ -348,6 +361,54 @@ describe('TranscriptionProcessor', () => {
     ]);
     expect(storage.chunkTranscriptPath).toHaveBeenCalledTimes(1);
     expect(storage.chunkTranscriptPath).toHaveBeenCalledWith(recording.id, 1);
+  });
+
+  it('reuses existing Notion page on retry instead of creating another page', async () => {
+    const { processor, prisma, audio, storage, openai, merge, notion } =
+      createHarness();
+    const recording = createRecording({
+      notionPageId: 'existing-page-id',
+      notionUrl: 'https://notion.test/existing-page',
+    });
+    const chunks = [
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 20,
+        path: '/storage/chunks/000000.mp3',
+        bytes: 1000,
+      },
+    ];
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(20);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createDurationChunks.mockResolvedValue(chunks);
+    openai.transcribe.mockResolvedValue({
+      text: 'Retry transcript',
+      raw: { retry: true },
+    });
+    merge.merge.mockReturnValue({
+      text: 'Retry transcript',
+      chunks: [{ ...chunks[0], text: 'Retry transcript' }],
+    });
+    storage.chunkTranscriptPath.mockReturnValue('/storage/transcripts/chunks/0.json');
+    storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
+
+    await expect(
+      processor.process(createJob({ data: { recordingId: recording.id } })),
+    ).resolves.toBeUndefined();
+
+    expect(notion.createRecordingPageMetadata).not.toHaveBeenCalled();
+    expect(notion.appendTranscriptToPage).toHaveBeenCalledWith({
+      pageId: 'existing-page-id',
+      transcript: 'Retry transcript',
+    });
+    expect(
+      prisma.recording.update.mock.calls.some(
+        ([input]) => input.data.notionPageId === 'existing-page-id',
+      ),
+    ).toBe(false);
   });
 
   it('logs a warning when no job run row is updated', async () => {
@@ -434,6 +495,8 @@ function createHarness() {
   };
   const notion = {
     createRecordingPage: jest.fn(),
+    createRecordingPageMetadata: jest.fn(),
+    appendTranscriptToPage: jest.fn(),
   };
   const processor = new (TranscriptionProcessor as any)(
     prisma as any,
@@ -456,6 +519,8 @@ type RecordingFixture = {
   language: string;
   model: string;
   recordedAt: Date;
+  notionPageId: string | null;
+  notionUrl: string | null;
 };
 
 function createRecording(overrides: Partial<RecordingFixture> = {}) {
@@ -468,6 +533,8 @@ function createRecording(overrides: Partial<RecordingFixture> = {}) {
     language: 'en',
     model: 'whisper-1',
     recordedAt: new Date('2026-07-02T12:00:00.000Z'),
+    notionPageId: null,
+    notionUrl: null,
     ...overrides,
   };
 }
