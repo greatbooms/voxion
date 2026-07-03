@@ -1,12 +1,14 @@
 import { z } from 'zod';
 
-const booleanString = z.string().transform((value) => value === 'true');
+const booleanString = z
+  .enum(['true', 'false'])
+  .transform((value) => value === 'true');
 
 export const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   REDIS_KEY_PREFIX: z.string().default('local:'),
   REDIS_HOST: z.string().default('localhost'),
-  REDIS_PORT: z.coerce.number().int().positive().default(6379),
+  REDIS_PORT: z.coerce.number().int().positive().max(65535).default(6379),
   REDIS_PASSWORD: z.string().optional(),
   REDIS_DB: z.coerce.number().int().nonnegative().default(0),
   REDIS_TTL: z.coerce.number().int().positive().default(300),
@@ -22,7 +24,7 @@ export const envSchema = z.object({
   STORAGE_ROOT: z.string().default('./storage'),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(2147483648),
   CHUNK_TARGET_BYTES: z.coerce.number().int().positive().default(25165824),
-  PORT: z.coerce.number().int().positive().default(3000),
+  PORT: z.coerce.number().int().positive().max(65535).default(3000),
 });
 
 export type Env = z.infer<typeof envSchema>;
