@@ -50,6 +50,21 @@ describe('AudioService', () => {
     ]);
   });
 
+  it('plans fractional total duration with a fractional final chunk end', () => {
+    expect(
+      service.planDurationChunks({
+        durationSeconds: 3600.5,
+        maxChunkSeconds: 900,
+      }),
+    ).toEqual([
+      { index: 0, startSeconds: 0, endSeconds: 900 },
+      { index: 1, startSeconds: 900, endSeconds: 1800 },
+      { index: 2, startSeconds: 1800, endSeconds: 2700 },
+      { index: 3, startSeconds: 2700, endSeconds: 3600 },
+      { index: 4, startSeconds: 3600, endSeconds: 3600.5 },
+    ]);
+  });
+
   it('rejects invalid chunk planning inputs', () => {
     expect(() =>
       service.planDurationChunks({
@@ -74,6 +89,14 @@ describe('AudioService', () => {
     );
   });
 
+  it('accepts fractional ffprobe duration output', async () => {
+    mockedRunCommand.mockResolvedValue('123.456\n');
+
+    await expect(service.probeDurationSeconds('/tmp/input.wav')).resolves.toBe(
+      123.456,
+    );
+  });
+
   it('rejects malformed ffprobe duration output', async () => {
     mockedRunCommand.mockResolvedValue('123abc\n');
 
@@ -88,14 +111,7 @@ describe('AudioService', () => {
     );
   });
 
-  it('rejects fractional chunk planning inputs', () => {
-    expect(() =>
-      service.planDurationChunks({
-        durationSeconds: 60.5,
-        maxChunkSeconds: 30,
-      }),
-    ).toThrow('Invalid durationSeconds');
-
+  it('rejects max chunk durations below one second', () => {
     expect(() =>
       service.planDurationChunks({
         durationSeconds: 60,

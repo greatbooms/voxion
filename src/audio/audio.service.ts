@@ -46,6 +46,11 @@ export class AudioService {
       path,
     ]);
     const trimmedOutput = output.trim();
+
+    if (!/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(trimmedOutput)) {
+      throw new Error(`Invalid ffprobe duration: ${trimmedOutput}`);
+    }
+
     const durationSeconds = Number(trimmedOutput);
 
     if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
@@ -70,8 +75,8 @@ export class AudioService {
   }
 
   planDurationChunks(input: PlanDurationChunksInput): PlannedChunk[] {
-    this.assertPositiveSafeInteger(input.durationSeconds, 'durationSeconds');
-    this.assertPositiveSafeInteger(input.maxChunkSeconds, 'maxChunkSeconds');
+    this.assertPositiveFinite(input.durationSeconds, 'durationSeconds');
+    this.assertMinimumChunkSeconds(input.maxChunkSeconds, 'maxChunkSeconds');
 
     const chunks: PlannedChunk[] = [];
     let startSeconds = 0;
@@ -151,8 +156,8 @@ export class AudioService {
     }
   }
 
-  private assertPositiveSafeInteger(value: number, name: string): void {
-    if (!Number.isSafeInteger(value) || value <= 0) {
+  private assertMinimumChunkSeconds(value: number, name: string): void {
+    if (!Number.isFinite(value) || value < 1) {
       throw new Error(`Invalid ${name}`);
     }
   }
