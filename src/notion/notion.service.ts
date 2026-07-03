@@ -64,6 +64,7 @@ type PageTranscriptState = {
   markerFound: boolean;
   chunksMarkerFound: boolean;
   transcriptTexts: string[];
+  chunkTexts: string[];
   blockIdsAfterMarker: string[];
 };
 
@@ -203,8 +204,11 @@ export class NotionService {
     chunks: TranscriptChunkSummary[] | undefined,
     state: PageTranscriptState,
   ): { blocks: AppendChildBlock[]; needsReset: boolean } {
-    const chunkBlocks = chunks?.length
-      ? [createChunksMarkerBlock(), ...createChunkSummaryBlocks(chunks)]
+    const chunkSummaryBlocks = chunks?.length
+      ? createChunkSummaryBlocks(chunks)
+      : [];
+    const chunkBlocks = chunkSummaryBlocks.length
+      ? [createChunksMarkerBlock(), ...chunkSummaryBlocks]
       : [];
 
     if (!state.markerFound) {
@@ -246,7 +250,34 @@ export class NotionService {
     const missingTranscriptBlocks = transcriptBlocks.slice(
       state.transcriptTexts.length,
     );
-    const missingChunkBlocks = state.chunksMarkerFound ? [] : chunkBlocks;
+
+    if (!transcriptComplete) {
+      return {
+        blocks: [...missingTranscriptBlocks, ...chunkBlocks],
+        needsReset: false,
+      };
+    }
+
+    if (!state.chunksMarkerFound) {
+      return {
+        blocks: [...missingTranscriptBlocks, ...chunkBlocks],
+        needsReset: false,
+      };
+    }
+
+    const expectedChunkTexts = chunkSummaryBlocks.map(blockText);
+    const chunksMatchExpected =
+      state.chunkTexts.length <= expectedChunkTexts.length &&
+      state.chunkTexts.every((text, index) => text === expectedChunkTexts[index]);
+
+    if (!chunksMatchExpected) {
+      return {
+        blocks: [...transcriptBlocks, ...chunkBlocks],
+        needsReset: true,
+      };
+    }
+
+    const missingChunkBlocks = chunkSummaryBlocks.slice(state.chunkTexts.length);
 
     return {
       blocks: [...missingTranscriptBlocks, ...missingChunkBlocks],
@@ -321,6 +352,7 @@ export class NotionService {
       markerFound: false,
       chunksMarkerFound: false,
       transcriptTexts: [],
+      chunkTexts: [],
       blockIdsAfterMarker: [],
     };
 
@@ -347,7 +379,12 @@ export class NotionService {
           continue;
         }
 
-        if (!state.chunksMarkerFound && isParagraphBlock(block)) {
+        if (state.chunksMarkerFound && isParagraphBlock(block)) {
+          state.chunkTexts.push(paragraphText(block));
+          continue;
+        }
+
+        if (isParagraphBlock(block)) {
           state.transcriptTexts.push(paragraphText(block));
         }
       }
@@ -522,6 +559,20 @@ function createChunkSummaryBlocks(
         ],
       },
     }));
+}
+
+function blockText(block: AppendChildBlock): string {
+  if ('paragraph' in block) {
+    return block.paragraph.rich_text
+      .map((richText) =>
+        richText.type === 'text' && 'text' in richText
+          ? richText.text.content
+          : '',
+      )
+      .join('');
+  }
+
+  return '';
 }
 
 function formatTimestamp(totalSeconds: number): string {

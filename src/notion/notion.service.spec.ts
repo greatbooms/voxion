@@ -579,6 +579,56 @@ describe('NotionService', () => {
     expect(append).not.toHaveBeenCalled();
   });
 
+  it('appends missing chunk summary blocks when a previous retry stopped inside the chunks section', async () => {
+    const list = jest.fn().mockResolvedValue({
+      results: [
+        markerBlock('Voxion Transcript'),
+        paragraphBlock('block-1', 'Paragraph 1'),
+        markerBlock('Voxion Chunks', 'chunks-marker'),
+        paragraphBlock('chunk-line-1', 'Chunk 1: 00:00:00 - 00:45:00'),
+      ],
+      has_more: false,
+      next_cursor: null,
+    });
+    const append = jest.fn().mockResolvedValue({});
+    MockedClient.mockImplementation(
+      () =>
+        ({
+          blocks: { children: { append, list } },
+        }) as unknown as Client,
+    );
+    const service = new NotionService({
+      notionToken: 'notion-token',
+      notionDataSourceId: 'data-source-id',
+      notionVersion: '2026-03-11',
+    } as AppConfigService);
+
+    await service.appendTranscriptToPage({
+      pageId: 'page-id',
+      transcript: 'Paragraph 1',
+      chunks: [
+        { index: 0, startSeconds: 0, endSeconds: 2700 },
+        { index: 1, startSeconds: 2700, endSeconds: 3600 },
+      ],
+    });
+
+    expect(append).toHaveBeenCalledWith({
+      block_id: 'page-id',
+      children: [
+        expect.objectContaining({
+          paragraph: {
+            rich_text: [
+              {
+                type: 'text',
+                text: { content: 'Chunk 2: 00:45:00 - 01:00:00' },
+              },
+            ],
+          },
+        }),
+      ],
+    });
+  });
+
   it('resets stale appended content when it no longer matches the transcript', async () => {
     const list = jest.fn().mockResolvedValue({
       results: [

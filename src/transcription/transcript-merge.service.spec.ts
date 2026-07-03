@@ -151,6 +151,28 @@ describe('TranscriptMergeService', () => {
     );
   });
 
+  it('removes duplicated boundary text from overlapped chunks', () => {
+    const result = service.merge(
+      [
+        {
+          index: 0,
+          text: '오늘 회의에서는 예산안을 검토했습니다. 다음 일정도 정했습니다.',
+          overlapSeconds: 0,
+        },
+        {
+          index: 1,
+          text: '다음 일정도 정했습니다. 마지막으로 질문을 받았습니다.',
+          overlapSeconds: 2,
+        },
+      ],
+      { language: 'ko' },
+    );
+
+    expect(result.text).toBe(
+      '오늘 회의에서는 예산안을 검토했습니다. 다음 일정도 정했습니다.\n\n마지막으로 질문을 받았습니다.',
+    );
+  });
+
   it('is exported from TranscriptionModule', async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [TranscriptionModule],

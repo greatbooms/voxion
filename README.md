@@ -11,7 +11,7 @@
 5. 각 청크를 OpenAI STT에 보내고 결과를 문장 단위로 재구성해 병합합니다.
 6. Notion 데이터 소스에 페이지를 만들고 `Voxion Transcript` 섹션 아래에 전사문을, `Voxion Chunks` 섹션 아래에 청크 타임스탬프를 append합니다.
 
-청크 분할은 `ffmpeg silencedetect`로 찾은 무음 경계를 우선 사용하고, 무음이 없으면 시간 기준으로 강제 분할합니다. 강제 분할 시에는 경계에서 단어가 잘리지 않도록 다음 청크가 2초 overlap을 두고 시작합니다. 잘라낸 청크가 목표 용량을 넘으면 자동으로 절반씩 재분할합니다. 긴 파일도 처리할 수 있도록 기본 청크 목표값은 `25_165_824` bytes(24 MiB)로 보수적으로 잡았습니다.
+청크 분할은 `ffmpeg silencedetect`로 찾은 무음 경계를 우선 사용하고, 무음이 없으면 시간 기준으로 강제 분할합니다. 강제 분할 시에는 경계에서 단어가 잘리지 않도록 다음 청크가 2초 overlap을 두고 시작합니다. 잘라낸 청크가 목표 용량을 넘으면 자동으로 절반씩 재분할합니다. 긴 파일도 처리할 수 있도록 기본 청크 목표값은 `24_000_000` bytes로 보수적으로 잡았습니다.
 
 ## 필요 조건
 
@@ -84,6 +84,7 @@ OpenAI Help Center도 API key는 [API key page에서 생성/관리](https://help
 3. Capabilities에서 최소한 아래 권한을 켭니다.
    - Read content: 기존 transcript 블록을 확인해 재시도 시 중복 append를 피하기 위해 필요합니다.
    - Insert content: 페이지 생성과 transcript 블록 append에 필요합니다.
+   - Update content: stale transcript 블록을 정리하고 재시도할 때 필요합니다.
 4. Configuration 탭에서 installation access token을 복사합니다.
 5. `.env`에 넣습니다.
 
@@ -216,7 +217,7 @@ npx prisma validate
 - Notion `403`: integration capability가 부족하거나 해당 데이터 소스에 connection을 추가하지 않았을 가능성이 큽니다.
 - `ffmpeg` 또는 `ffprobe` 실행 실패: 설치 여부와 `PATH`를 확인합니다.
 - 업로드 파일이 너무 큼: `MAX_UPLOAD_BYTES`를 조정할 수 있습니다. 기본값은 2GiB입니다.
-- OpenAI STT 요청이 파일 크기로 실패: `CHUNK_TARGET_BYTES`를 더 낮춥니다. 기본값은 `25165824`입니다.
+- OpenAI STT 요청이 파일 크기로 실패: `CHUNK_TARGET_BYTES`를 더 낮춥니다. 기본값은 `24000000`입니다.
 
 ## 참고 문서
 

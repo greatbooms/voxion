@@ -1,6 +1,10 @@
 import { Injectable } from '@nestjs/common';
 
-export type ChunkTranscript = { index: number; text: string };
+export type ChunkTranscript = {
+  index: number;
+  text: string;
+  overlapSeconds?: number;
+};
 export type MergedTranscript<T extends ChunkTranscript = ChunkTranscript> = {
   text: string;
   chunks: T[];
@@ -23,14 +27,26 @@ export class TranscriptMergeService {
       (left, right) => left.index - right.index,
     );
 
-    return {
-      text: orderedChunks
-        .flatMap((chunk) =>
-          this.toParagraphs(this.normalizeWhitespace(chunk.text), options),
-        )
-        .join('\n\n'),
-      chunks: orderedChunks,
-    };
+    const paragraphs: string[] = [];
+    let mergedText = '';
+
+    for (const chunk of orderedChunks) {
+      const text =
+        chunk.overlapSeconds && chunk.overlapSeconds > 0
+          ? removeDuplicatedOverlap(
+              mergedText,
+              this.normalizeWhitespace(chunk.text),
+            )
+          : this.normalizeWhitespace(chunk.text);
+
+      paragraphs.push(...this.toParagraphs(text, options));
+
+      if (text.length > 0) {
+        mergedText = mergedText.length > 0 ? `${mergedText} ${text}` : text;
+      }
+    }
+
+    return { text: paragraphs.join('\n\n'), chunks: orderedChunks };
   }
 
   private toParagraphs(text: string, options: MergeOptions): string[] {
@@ -112,4 +128,25 @@ function fallbackSentenceSplit(text: string): string[] {
     .split(/(?<=[.!?…。！？])\s+/)
     .map((sentence) => sentence.trim())
     .filter((sentence) => sentence.length > 0);
+}
+
+function removeDuplicatedOverlap(previousText: string, currentText: string): string {
+  if (previousText.length === 0 || currentText.length === 0) {
+    return currentText;
+  }
+
+  const previousWords = previousText.split(' ');
+  const currentWords = currentText.split(' ');
+  const maxOverlap = Math.min(previousWords.length, currentWords.length);
+
+  for (let size = maxOverlap; size >= 2; size -= 1) {
+    const previousSuffix = previousWords.slice(-size).join(' ').toLowerCase();
+    const currentPrefix = currentWords.slice(0, size).join(' ').toLowerCase();
+
+    if (previousSuffix === currentPrefix) {
+      return currentWords.slice(size).join(' ');
+    }
+  }
+
+  return currentText;
 }
