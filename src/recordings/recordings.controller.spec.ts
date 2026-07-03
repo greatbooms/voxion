@@ -1,5 +1,7 @@
 import { Readable } from 'node:stream';
-import { unlink } from 'node:fs/promises';
+import { mkdtemp, rm, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ConflictException, INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma, RecordingStatus } from '@prisma/client';
@@ -155,7 +157,7 @@ describe('RecordingsController', () => {
       update: jest.Mock;
     };
   };
-  let storage: { saveOriginalUpload: jest.Mock };
+  let storage: { saveOriginalUpload: jest.Mock; moveOriginalUpload: jest.Mock };
   let transcriptionQueue: { enqueue: jest.Mock };
 
   beforeEach(async () => {
@@ -196,6 +198,9 @@ describe('RecordingsController', () => {
     );
     storage = {
       saveOriginalUpload: jest.fn().mockResolvedValue({
+        path: `/tmp/originals/${recordingId}/meeting.m4a`,
+      }),
+      moveOriginalUpload: jest.fn().mockResolvedValue({
         path: `/tmp/originals/${recordingId}/meeting.m4a`,
       }),
     };
@@ -259,6 +264,7 @@ describe('RecordingsController', () => {
       originalFilename: 'meeting.m4a',
       buffer: Buffer.from('audio'),
     });
+    expect(storage.moveOriginalUpload).not.toHaveBeenCalled();
     expect(prisma.recording.update).toHaveBeenCalledWith({
       where: { id: recordingId },
       data: {
@@ -387,6 +393,43 @@ describe('RecordingsController', () => {
     });
   });
 
+  it('cleans up disk-backed temp uploads when storage adoption fails', async () => {
+    const tempPath = '/tmp/voxion-upload';
+    storage.moveOriginalUpload.mockRejectedValue(new Error('disk full'));
+
+    await expect(
+      controller.create(
+        {},
+        makeFile({ path: tempPath, buffer: undefined as any }),
+      ),
+    ).rejects.toThrow('disk full');
+
+    expect(mockedUnlink).toHaveBeenCalledWith(tempPath);
+    expect(prisma.recording.update).toHaveBeenCalledWith({
+      where: { id: recordingId },
+      data: {
+        status: 'FAILED',
+        errorCode: 'STORAGE_SAVE_FAILED',
+        errorMessage: 'disk full',
+      },
+    });
+  });
+
+  it('moves disk-backed uploads instead of reading a buffer', async () => {
+    const tempPath = '/tmp/voxion-upload';
+    await controller.create(
+      {},
+      makeFile({ path: tempPath, buffer: undefined as any }),
+    );
+
+    expect(storage.moveOriginalUpload).toHaveBeenCalledWith({
+      recordingId,
+      originalFilename: 'meeting.m4a',
+      tempPath,
+    });
+    expect(storage.saveOriginalUpload).not.toHaveBeenCalled();
+  });
+
   it('marks the recording failed when enqueue fails after queueing', async () => {
     transcriptionQueue.enqueue.mockRejectedValue(new Error('redis unavailable'));
 
@@ -507,6 +550,25 @@ describe('RecordingsController', () => {
     expect(prisma.recording.create).not.toHaveBeenCalled();
   });
 
+  it('cleans up disk-backed temp uploads when validation fails', async () => {
+    const tempPath = '/tmp/voxion-upload';
+
+    await expect(
+      controller.create(
+        {},
+        makeFile({
+          path: tempPath,
+          buffer: undefined as any,
+          originalname: 'meeting.txt',
+          mimetype: 'text/plain',
+        }),
+      ),
+    ).rejects.toThrow('Unsupported media type: text/plain');
+
+    expect(mockedUnlink).toHaveBeenCalledWith(tempPath);
+    expect(prisma.recording.create).not.toHaveBeenCalled();
+  });
+
   it('finds and maps a recording with chunks ordered by index', async () => {
     const recording = makeRecordingWithChunk();
     prisma.recording.findUnique.mockResolvedValue(recording);
@@ -590,13 +652,19 @@ describe('RecordingsController', () => {
 
 describe('RecordingsController HTTP routes', () => {
   let app: INestApplication | undefined;
+  let storageRoot: string | undefined;
 
   afterEach(async () => {
     await app?.close();
     app = undefined;
+    if (storageRoot) {
+      await rm(storageRoot, { recursive: true, force: true });
+      storageRoot = undefined;
+    }
   });
 
-  it('accepts multipart uploads through the controller interceptor', async () => {
+  it('accepts multipart uploads through the controller interceptor without buffering in memory', async () => {
+    storageRoot = await mkdtemp(join(tmpdir(), 'voxion-http-upload-'));
     const recordings = {
       create: jest
         .fn()
@@ -606,7 +674,10 @@ describe('RecordingsController HTTP routes', () => {
       controllers: [RecordingsController],
       providers: [
         { provide: RecordingsService, useValue: recordings },
-        { provide: AppConfigService, useValue: { maxUploadBytes: 1024 } },
+        {
+          provide: AppConfigService,
+          useValue: { maxUploadBytes: 1024, storageRoot },
+        },
       ],
     }).compile();
 
@@ -631,9 +702,10 @@ describe('RecordingsController HTTP routes', () => {
         originalname: 'meeting.m4a',
         mimetype: 'audio/m4a',
         size: 5,
-        buffer: Buffer.from('audio'),
+        path: expect.stringContaining(join(storageRoot, 'tmp', 'uploads')),
       }),
     );
+    expect(recordings.create.mock.calls[0][1]).not.toHaveProperty('buffer');
   });
 
   it('rejects multipart uploads over the configured controller limit', async () => {
@@ -646,7 +718,10 @@ describe('RecordingsController HTTP routes', () => {
       controllers: [RecordingsController],
       providers: [
         { provide: RecordingsService, useValue: recordings },
-        { provide: AppConfigService, useValue: { maxUploadBytes: 4 } },
+        {
+          provide: AppConfigService,
+          useValue: { maxUploadBytes: 4, storageRoot: tmpdir() },
+        },
       ],
     }).compile();
 
@@ -699,7 +774,10 @@ describe('RecordingsController HTTP routes', () => {
       controllers: [RecordingsController],
       providers: [
         { provide: RecordingsService, useValue: recordings },
-        { provide: AppConfigService, useValue: { maxUploadBytes: 1024 } },
+        {
+          provide: AppConfigService,
+          useValue: { maxUploadBytes: 1024, storageRoot: tmpdir() },
+        },
       ],
     }).compile();
 

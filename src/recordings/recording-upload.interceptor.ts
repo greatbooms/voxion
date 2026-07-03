@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { mkdir } from 'node:fs/promises';
+import { extname, resolve as resolvePath } from 'node:path';
 import {
   BadRequestException,
   CallHandler,
@@ -7,7 +10,7 @@ import {
   PayloadTooLargeException,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-import multer, { memoryStorage } from 'multer';
+import multer, { diskStorage } from 'multer';
 import { Observable } from 'rxjs';
 import { AppConfigService } from '../config/app-config.service';
 
@@ -24,8 +27,24 @@ export class RecordingUploadInterceptor implements NestInterceptor {
     const response = http.getResponse<Response>();
 
     await new Promise<void>((resolve, reject) => {
+      const uploadDirectory = resolvePath(
+        this.config.storageRoot,
+        'tmp',
+        'uploads',
+      );
       const upload = multer({
-        storage: memoryStorage(),
+        storage: diskStorage({
+          destination: (_request, _file, callback) => {
+            mkdir(uploadDirectory, { recursive: true })
+              .then(() => callback(null, uploadDirectory))
+              .catch((error: unknown) =>
+                callback(error as Error, uploadDirectory),
+              );
+          },
+          filename: (_request, file, callback) => {
+            callback(null, `${randomUUID()}${extname(file.originalname)}`);
+          },
+        }),
         limits: { fileSize: this.config.maxUploadBytes },
       }).single('file');
 

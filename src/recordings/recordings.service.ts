@@ -107,33 +107,45 @@ export class RecordingsService {
     dto: CreateRecordingDto,
     file?: Express.Multer.File,
   ): Promise<{ recordingId: string; jobId: string; status: RecordingStatus }> {
-    this.validateUpload(file);
-    const recordedAt = this.parseRecordedAt(dto.recordedAt);
-    const language = this.parseLanguage(dto.language);
+    let recordedAt: Date;
+    let language: string;
 
-    const uploaded = await this.prisma.recording.create({
-      data: {
-        status: RecordingStatus.UPLOADED,
-        title: dto.title,
-        originalFilename: file.originalname,
-        mimeType: file.mimetype,
-        originalPath: '',
-        originalBytes: BigInt(file.size),
-        language,
-        model: this.config.openaiTranscriptionModel,
-        recordedAt,
-      },
-    });
+    try {
+      this.validateUpload(file);
+      recordedAt = this.parseRecordedAt(dto.recordedAt);
+      language = this.parseLanguage(dto.language);
+    } catch (error) {
+      await this.removeTempUpload(file);
+      throw error;
+    }
+
+    let uploaded: { id: string };
+
+    try {
+      uploaded = await this.prisma.recording.create({
+        data: {
+          status: RecordingStatus.UPLOADED,
+          title: dto.title,
+          originalFilename: file.originalname,
+          mimeType: file.mimetype,
+          originalPath: '',
+          originalBytes: BigInt(file.size),
+          language,
+          model: this.config.openaiTranscriptionModel,
+          recordedAt,
+        },
+      });
+    } catch (error) {
+      await this.removeTempUpload(file);
+      throw error;
+    }
 
     let saved: { path: string };
 
     try {
-      saved = await this.storage.saveOriginalUpload({
-        recordingId: uploaded.id,
-        originalFilename: file.originalname,
-        buffer: file.buffer,
-      });
+      saved = await this.persistOriginalUpload(uploaded.id, file);
     } catch (error) {
+      await this.removeTempUpload(file);
       await this.prisma.recording.update({
         where: { id: uploaded.id },
         data: {
@@ -372,6 +384,33 @@ export class RecordingsService {
     } catch {
       // Best effort cleanup only.
     }
+  }
+
+  private async removeTempUpload(file?: Express.Multer.File): Promise<void> {
+    if (!file?.path) {
+      return;
+    }
+
+    await this.removeSavedFile(file.path);
+  }
+
+  private persistOriginalUpload(
+    recordingId: string,
+    file: Express.Multer.File,
+  ): Promise<{ path: string }> {
+    if (file.path) {
+      return this.storage.moveOriginalUpload({
+        recordingId,
+        originalFilename: file.originalname,
+        tempPath: file.path,
+      });
+    }
+
+    return this.storage.saveOriginalUpload({
+      recordingId,
+      originalFilename: file.originalname,
+      buffer: file.buffer,
+    });
   }
 
   private async markRecordingFailed(

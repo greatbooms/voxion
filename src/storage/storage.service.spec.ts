@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { Test } from '@nestjs/testing';
@@ -34,6 +41,24 @@ describe('StorageService', () => {
     await expect(readFile(saved.path)).resolves.toEqual(buffer);
   });
 
+  it('moves temp uploads into the originals directory', async () => {
+    const tempDirectory = service.tempUploadDirectory();
+    const tempPath = join(tempDirectory, 'multer-upload');
+    await mkdir(tempDirectory, { recursive: true });
+    await writeFile(tempPath, Buffer.from('audio'));
+
+    const saved = await service.moveOriginalUpload({
+      recordingId,
+      originalFilename: '../meeting audio.m4a',
+      tempPath,
+    });
+
+    expect(dirname(saved.path)).toBe(join(root, 'originals', recordingId));
+    expect(basename(saved.path)).toBe('meeting-audio.m4a');
+    await expect(readFile(saved.path)).resolves.toEqual(Buffer.from('audio'));
+    await expect(stat(tempPath)).rejects.toThrow();
+  });
+
   it('builds chunk and transcript paths under the storage root', () => {
     expect(service.normalizedPath(recordingId)).toBe(
       join(root, 'normalized', recordingId, 'normalized.mp3'),
@@ -66,6 +91,13 @@ describe('StorageService', () => {
     expect(() => service.finalTranscriptPath(traversalRecordingId)).toThrow(
       'Invalid recordingId',
     );
+    await expect(
+      service.moveOriginalUpload({
+        recordingId: traversalRecordingId,
+        originalFilename: 'meeting.m4a',
+        tempPath: join(root, 'tmp', 'uploads', 'upload'),
+      }),
+    ).rejects.toThrow('Invalid recordingId');
 
     let rejected = false;
     try {
