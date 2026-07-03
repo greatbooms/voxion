@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RecordingStatus {
+  UPLOADED
+  QUEUED
+  PROBING
+  CHUNKING
+  TRANSCRIBING
+  MERGING
+  UPLOADING_TO_NOTION
+  COMPLETED
+  FAILED
+}
+
+enum ChunkStatus {
+  PENDING
+  TRANSCRIBING
+  COMPLETED
+  FAILED
+}
+
+enum JobRunStatus {
+  QUEUED
+  ACTIVE
+  COMPLETED
+  FAILED
+}
+
+model Recording {
+  id                String           @id @default(uuid())
+  status            RecordingStatus  @default(UPLOADED)
+  title             String?
+  originalFilename  String
+  mimeType          String
+  originalPath      String
+  originalBytes     BigInt
+  normalizedPath    String?
+  durationSeconds   Decimal?         @db.Decimal(12, 3)
+  language          String
+  model             String
+  chunkCount        Int              @default(0)
+  transcriptPath    String?
+  transcriptText    String?
+  notionPageId      String?
+  notionUrl         String?
+  errorCode         String?
+  errorMessage      String?
+  recordedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  completedAt       DateTime?
+  chunks            RecordingChunk[]
+  jobRuns           JobRun[]
+}
+
+model RecordingChunk {
+  id             String       @id @default(uuid())
+  recordingId    String
+  recording      Recording    @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  index          Int
+  status         ChunkStatus  @default(PENDING)
+  path           String
+  bytes          BigInt
+  startSeconds   Decimal      @db.Decimal(12, 3)
+  endSeconds     Decimal      @db.Decimal(12, 3)
+  transcriptPath String?
+  text           String?
+  errorCode      String?
+  errorMessage   String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([recordingId, index])
+  @@index([recordingId])
+}
+
+model JobRun {
+  id           String       @id @default(uuid())
+  recordingId  String
+  recording    Recording    @relation(fields: [recordingId], references: [id], onDelete: Cascade)
+  queueName    String
+  bullJobId    String
+  status       JobRunStatus @default(QUEUED)
+  attemptsMade Int          @default(0)
+  lastError    String?
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  @@index([recordingId])
+  @@index([queueName, bullJobId])
+}
