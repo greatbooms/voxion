@@ -1,7 +1,9 @@
 import { Test } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
+import { getQueueToken } from '@nestjs/bullmq';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
+import { TRANSCRIPTION_QUEUE } from '../src/jobs/jobs.constants';
 import { PrismaService } from '../src/prisma/prisma.service';
 
 const prismaMock = {
@@ -18,6 +20,8 @@ describe('App', () => {
     })
       .overrideProvider(PrismaService)
       .useValue(prismaMock)
+      .overrideProvider(getQueueToken(TRANSCRIPTION_QUEUE))
+      .useValue({ add: jest.fn() })
       .compile();
 
     app = moduleRef.createNestApplication();

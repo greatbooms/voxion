@@ -5,8 +5,15 @@ import {
   NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
-import { ChunkStatus, Prisma, RecordingStatus } from '@prisma/client';
+import {
+  ChunkStatus,
+  JobRunStatus,
+  Prisma,
+  RecordingStatus,
+} from '@prisma/client';
 import { AppConfigService } from '../config/app-config.service';
+import { TRANSCRIPTION_QUEUE } from '../jobs/jobs.constants';
+import { TranscriptionQueue } from '../jobs/transcription.queue';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateRecordingDto } from './dto/create-recording.dto';
@@ -23,6 +30,8 @@ const SUPPORTED_MEDIA_MIME_TYPES = new Set([
 
 const STORAGE_SAVE_FAILED_CODE = 'STORAGE_SAVE_FAILED';
 const FINALIZE_RECORDING_FAILED_CODE = 'FINALIZE_RECORDING_FAILED';
+const ENQUEUE_RECORDING_FAILED_CODE = 'ENQUEUE_RECORDING_FAILED';
+const CREATE_JOB_RUN_FAILED_CODE = 'CREATE_JOB_RUN_FAILED';
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISO_DATETIME_WITH_TIMEZONE =
@@ -82,12 +91,13 @@ export class RecordingsService {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly config: AppConfigService,
+    private readonly transcriptionQueue: TranscriptionQueue,
   ) {}
 
   async create(
     dto: CreateRecordingDto,
     file?: Express.Multer.File,
-  ): Promise<{ recordingId: string; status: RecordingStatus }> {
+  ): Promise<{ recordingId: string; jobId: string; status: RecordingStatus }> {
     this.validateUpload(file);
     const recordedAt = this.parseRecordedAt(dto.recordedAt);
     const language = this.parseLanguage(dto.language);
@@ -156,8 +166,42 @@ export class RecordingsService {
       throw error;
     }
 
+    let jobId: string;
+
+    try {
+      jobId = await this.transcriptionQueue.enqueue(recording.id);
+    } catch (error) {
+      await this.markRecordingFailed(
+        recording.id,
+        ENQUEUE_RECORDING_FAILED_CODE,
+        error,
+      );
+
+      throw error;
+    }
+
+    try {
+      await this.prisma.jobRun.create({
+        data: {
+          recordingId: recording.id,
+          queueName: TRANSCRIPTION_QUEUE,
+          bullJobId: jobId,
+          status: JobRunStatus.QUEUED,
+        },
+      });
+    } catch (error) {
+      await this.markRecordingFailed(
+        recording.id,
+        CREATE_JOB_RUN_FAILED_CODE,
+        error,
+      );
+
+      throw error;
+    }
+
     return {
       recordingId: recording.id,
+      jobId,
       status: recording.status,
     };
   }
@@ -289,6 +333,25 @@ export class RecordingsService {
       await unlink(path);
     } catch {
       // Best effort cleanup only.
+    }
+  }
+
+  private async markRecordingFailed(
+    recordingId: string,
+    errorCode: string,
+    error: unknown,
+  ): Promise<void> {
+    try {
+      await this.prisma.recording.update({
+        where: { id: recordingId },
+        data: {
+          status: RecordingStatus.FAILED,
+          errorCode,
+          errorMessage: this.errorMessage(error),
+        },
+      });
+    } catch {
+      // Preserve the original queue/job-run failure after best-effort recovery.
     }
   }
 

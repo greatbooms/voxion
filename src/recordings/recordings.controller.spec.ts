@@ -5,6 +5,8 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import request from 'supertest';
 import { AppConfigService } from '../config/app-config.service';
+import { TRANSCRIPTION_QUEUE } from '../jobs/jobs.constants';
+import { TranscriptionQueue } from '../jobs/transcription.queue';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { RecordingsController } from './recordings.controller';
@@ -19,6 +21,7 @@ const mockedUnlink = unlink as jest.MockedFunction<typeof unlink>;
 
 const recordingId = '00000000-0000-4000-8000-000000000001';
 const chunkId = '00000000-0000-4000-8000-000000000002';
+const bullJobId = 'bull-job-1';
 const recordedAt = new Date('2026-07-02T03:04:05.000Z');
 const createdAt = new Date('2026-07-03T01:02:03.000Z');
 
@@ -139,8 +142,12 @@ describe('RecordingsController', () => {
       update: jest.Mock;
       findUnique: jest.Mock;
     };
+    jobRun: {
+      create: jest.Mock;
+    };
   };
   let storage: { saveOriginalUpload: jest.Mock };
+  let transcriptionQueue: { enqueue: jest.Mock };
 
   beforeEach(async () => {
     mockedUnlink.mockResolvedValue(undefined);
@@ -162,6 +169,12 @@ describe('RecordingsController', () => {
         }),
         findUnique: jest.fn(),
       },
+      jobRun: {
+        create: jest.fn().mockResolvedValue({
+          id: '00000000-0000-4000-8000-000000000003',
+          bullJobId,
+        }),
+      },
     };
     prisma.$transaction.mockImplementation(
       (callback: (client: typeof prisma) => unknown) => callback(prisma),
@@ -171,6 +184,9 @@ describe('RecordingsController', () => {
         path: `/tmp/originals/${recordingId}/meeting.m4a`,
       }),
     };
+    transcriptionQueue = {
+      enqueue: jest.fn().mockResolvedValue(bullJobId),
+    };
 
     moduleRef = await Test.createTestingModule({
       controllers: [RecordingsController],
@@ -179,6 +195,7 @@ describe('RecordingsController', () => {
         { provide: AppConfigService, useValue: config },
         { provide: PrismaService, useValue: prisma },
         { provide: StorageService, useValue: storage },
+        { provide: TranscriptionQueue, useValue: transcriptionQueue },
       ],
     }).compile();
     controller = moduleRef.get(RecordingsController);
@@ -200,7 +217,7 @@ describe('RecordingsController', () => {
       makeFile(),
     );
 
-    expect(result).toEqual({ recordingId, status: 'QUEUED' });
+    expect(result).toEqual({ recordingId, jobId: bullJobId, status: 'QUEUED' });
 
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.recording.create).toHaveBeenCalledWith({
@@ -225,6 +242,15 @@ describe('RecordingsController', () => {
       where: { id: recordingId },
       data: {
         originalPath: `/tmp/originals/${recordingId}/meeting.m4a`,
+        status: 'QUEUED',
+      },
+    });
+    expect(transcriptionQueue.enqueue).toHaveBeenCalledWith(recordingId);
+    expect(prisma.jobRun.create).toHaveBeenCalledWith({
+      data: {
+        recordingId,
+        queueName: TRANSCRIPTION_QUEUE,
+        bullJobId,
         status: 'QUEUED',
       },
     });
@@ -320,12 +346,57 @@ describe('RecordingsController', () => {
     );
 
     expect(prisma.recording.create).toHaveBeenCalled();
+    expect(transcriptionQueue.enqueue).not.toHaveBeenCalled();
+    expect(prisma.jobRun.create).not.toHaveBeenCalled();
     expect(prisma.recording.update).toHaveBeenCalledWith({
       where: { id: recordingId },
       data: {
         status: 'FAILED',
         errorCode: 'STORAGE_SAVE_FAILED',
         errorMessage: 'disk full',
+      },
+    });
+  });
+
+  it('marks the recording failed when enqueue fails after queueing', async () => {
+    transcriptionQueue.enqueue.mockRejectedValue(new Error('redis unavailable'));
+
+    await expect(controller.create({}, makeFile())).rejects.toThrow(
+      'redis unavailable',
+    );
+
+    expect(prisma.recording.update).toHaveBeenNthCalledWith(1, {
+      where: { id: recordingId },
+      data: {
+        originalPath: `/tmp/originals/${recordingId}/meeting.m4a`,
+        status: 'QUEUED',
+      },
+    });
+    expect(prisma.recording.update).toHaveBeenNthCalledWith(2, {
+      where: { id: recordingId },
+      data: {
+        status: 'FAILED',
+        errorCode: 'ENQUEUE_RECORDING_FAILED',
+        errorMessage: 'redis unavailable',
+      },
+    });
+    expect(prisma.jobRun.create).not.toHaveBeenCalled();
+  });
+
+  it('marks the recording failed when job run creation fails after enqueue', async () => {
+    prisma.jobRun.create.mockRejectedValue(new Error('job run write failed'));
+
+    await expect(controller.create({}, makeFile())).rejects.toThrow(
+      'job run write failed',
+    );
+
+    expect(transcriptionQueue.enqueue).toHaveBeenCalledWith(recordingId);
+    expect(prisma.recording.update).toHaveBeenNthCalledWith(2, {
+      where: { id: recordingId },
+      data: {
+        status: 'FAILED',
+        errorCode: 'CREATE_JOB_RUN_FAILED',
+        errorMessage: 'job run write failed',
       },
     });
   });
@@ -347,6 +418,8 @@ describe('RecordingsController', () => {
 
     expect(storage.saveOriginalUpload).toHaveBeenCalled();
     expect(mockedUnlink).toHaveBeenCalledWith(savedPath);
+    expect(transcriptionQueue.enqueue).not.toHaveBeenCalled();
+    expect(prisma.jobRun.create).not.toHaveBeenCalled();
     expect(prisma.recording.update).toHaveBeenNthCalledWith(1, {
       where: { id: recordingId },
       data: {
@@ -435,7 +508,9 @@ describe('RecordingsController HTTP routes', () => {
 
   it('accepts multipart uploads through the controller interceptor', async () => {
     const recordings = {
-      create: jest.fn().mockResolvedValue({ recordingId, status: 'QUEUED' }),
+      create: jest
+        .fn()
+        .mockResolvedValue({ recordingId, jobId: bullJobId, status: 'QUEUED' }),
     };
     const moduleRef = await Test.createTestingModule({
       controllers: [RecordingsController],
@@ -457,7 +532,7 @@ describe('RecordingsController HTTP routes', () => {
         contentType: 'audio/m4a',
       })
       .expect(201)
-      .expect({ recordingId, status: 'QUEUED' });
+      .expect({ recordingId, jobId: bullJobId, status: 'QUEUED' });
 
     expect(recordings.create).toHaveBeenCalledWith(
       { title: 'HTTP upload', language: 'en' },
@@ -473,7 +548,9 @@ describe('RecordingsController HTTP routes', () => {
 
   it('rejects multipart uploads over the configured controller limit', async () => {
     const recordings = {
-      create: jest.fn().mockResolvedValue({ recordingId, status: 'QUEUED' }),
+      create: jest
+        .fn()
+        .mockResolvedValue({ recordingId, jobId: bullJobId, status: 'QUEUED' }),
     };
     const moduleRef = await Test.createTestingModule({
       controllers: [RecordingsController],
@@ -510,6 +587,7 @@ describe('RecordingsController HTTP routes', () => {
         { provide: AppConfigService, useValue: {} },
         { provide: PrismaService, useValue: prisma },
         { provide: StorageService, useValue: {} },
+        { provide: TranscriptionQueue, useValue: {} },
       ],
     }).compile();
 
