@@ -11,6 +11,10 @@ import {
   splitTranscriptIntoParagraphBlocks,
 } from './notion-blocks';
 
+type DataSourceParent = {
+  data_source_id: string;
+};
+
 export type CreateRecordingPageInput = {
   title: string;
   status: string;
@@ -60,8 +64,8 @@ export class NotionService {
     )) {
       await notion.blocks.children.append({
         block_id: page.id,
-        children: batch,
-      } as AppendBlockChildrenParameters);
+        children: batch as AppendBlockChildrenParameters['children'],
+      });
     }
 
     return { pageId: page.id, url: getPageUrl(page) };
@@ -72,8 +76,11 @@ export class NotionService {
     dataSourceId: string,
     uploadedAt: string,
   ): CreatePageParameters {
+    const parent: DataSourceParent = { data_source_id: dataSourceId };
+
     return {
-      parent: { data_source_id: dataSourceId },
+      // The Notion data-source API supports data_source_id, but the installed SDK types lag.
+      parent: parent as unknown as CreatePageParameters['parent'],
       properties: {
         Name: {
           title: [{ text: { content: input.title } }],
@@ -108,7 +115,7 @@ export class NotionService {
           date: { start: uploadedAt },
         },
       },
-    } as unknown as CreatePageParameters;
+    };
   }
 }
 
