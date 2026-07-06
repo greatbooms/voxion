@@ -210,6 +210,20 @@ describe('TranscriptionProcessor', () => {
         { index: 1, startSeconds: 60.5, endSeconds: 121.25 },
       ],
     });
+    expect(storage.removeRecordingArtifacts).toHaveBeenCalledWith(recording.id);
+    const completedRecordingCall = prisma.recording.update.mock.calls.findIndex(
+      ([input]) => input.data.status === 'COMPLETED',
+    );
+    const cleanupOrder =
+      storage.removeRecordingArtifacts.mock.invocationCallOrder[0];
+    expect(
+      prisma.recording.update.mock.invocationCallOrder[completedRecordingCall],
+    ).toBeLessThan(cleanupOrder);
+    expect(
+      prisma.jobRun.updateMany.mock.invocationCallOrder[
+        prisma.jobRun.updateMany.mock.invocationCallOrder.length - 1
+      ],
+    ).toBeLessThan(cleanupOrder);
     const createOrder =
       notion.createRecordingPageMetadata.mock.invocationCallOrder[0];
     const persistOrder = prisma.recording.update.mock.calls.findIndex(
@@ -648,6 +662,60 @@ describe('TranscriptionProcessor', () => {
     );
   });
 
+  it('completes the job when best-effort artifact cleanup fails', async () => {
+    const { processor, prisma, audio, storage, openai, merge, notion } =
+      createHarness();
+    const warn = jest.spyOn((processor as any).logger, 'warn');
+    const recording = createRecording();
+    const chunks = [
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 20,
+        path: '/storage/chunks/000000.mp3',
+        bytes: 1000,
+        overlapSeconds: 0,
+      },
+    ];
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(20);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createChunks.mockResolvedValue(chunks);
+    storage.chunkTranscriptPath.mockReturnValue('/storage/transcripts/chunks/0.json');
+    storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
+    openai.transcribe.mockResolvedValue({ text: 'Transcript', raw: {} });
+    merge.merge.mockReturnValue({
+      text: 'Transcript',
+      chunks: [{ ...chunks[0], text: 'Transcript' }],
+    });
+    notion.createRecordingPageMetadata.mockResolvedValue({
+      pageId: 'notion-page-id',
+      url: 'https://notion.test/page',
+    });
+    storage.removeRecordingArtifacts.mockRejectedValue(new Error('disk busy'));
+
+    await expect(
+      processor.process(createJob({ data: { recordingId: recording.id } })),
+    ).resolves.toBeUndefined();
+
+    expect(prisma.recording.update).toHaveBeenLastCalledWith({
+      where: { id: recording.id },
+      data: {
+        status: 'COMPLETED',
+        completedAt: expect.any(Date),
+      },
+    });
+    expect(prisma.jobRun.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: { status: 'COMPLETED', attemptsMade: 1, lastError: null },
+      }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      `Failed to clean up recording artifacts for ${recording.id}: disk busy`,
+    );
+  });
+
   it('logs a warning when no job run row is updated', async () => {
     const { processor, prisma } = createHarness();
     const warn = jest.spyOn((processor as any).logger, 'warn');
@@ -731,6 +799,7 @@ function createHarness() {
     chunkTranscriptPath: jest.fn(),
     finalTranscriptPath: jest.fn(),
     ensureParent: jest.fn(),
+    removeRecordingArtifacts: jest.fn().mockResolvedValue(undefined),
   };
   const openai = {
     transcribe: jest.fn(),

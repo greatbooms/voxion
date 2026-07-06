@@ -34,7 +34,7 @@ export class TranscriptionQueue {
         attempts: 3,
         backoff: { type: 'exponential', delay: 30000 },
         removeOnComplete: 100,
-        removeOnFail: false,
+        removeOnFail: 100,
       },
     );
 

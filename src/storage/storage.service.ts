@@ -1,4 +1,4 @@
-import { copyFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { Inject, Injectable } from '@nestjs/common';
 import { AppConfigService } from '../config/app-config.service';
@@ -100,6 +100,20 @@ export class StorageService {
       'transcripts',
       this.requireRecordingId(recordingId),
       'final.json',
+    );
+  }
+
+  async removeRecordingArtifacts(recordingId: string): Promise<void> {
+    const safeRecordingId = this.requireRecordingId(recordingId);
+    const paths = [
+      this.storagePath('originals', safeRecordingId),
+      this.storagePath('normalized', safeRecordingId),
+      this.storagePath('chunks', safeRecordingId),
+      this.storagePath('transcripts', safeRecordingId, 'chunks'),
+    ];
+
+    await Promise.all(
+      paths.map((path) => rm(path, { recursive: true, force: true })),
     );
   }
 
