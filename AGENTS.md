@@ -15,10 +15,13 @@
 
 사용자가 만든 미커밋 변경을 되돌리거나 덮어쓰지 않습니다. 관련 없는 변경은 그대로 두고, 같은 파일에 섞여 있으면 먼저 맥락을 확인합니다.
 
-기본 통합 브랜치는 `main`입니다. 기능/수정 작업은 가능하면 `fix/*`, `feat/*`, `chore/*` 같은 별도 브랜치에서 진행한 뒤 `main`에 병합합니다.
+기본 통합 브랜치는 `main`입니다. 코드 변경 작업을 시작할 때는 `main`을 최신 원격 상태로 pull/fetch 받은 뒤, 그 최신 `main`을 기준으로 작업 브랜치를 생성합니다.
 
-커밋 메시지는 짧은 영어 문장으로 작성합니다.
-예: `Add completed recording artifact cleanup`, `Fix Notion retry append state`
+작업 브랜치 이름은 Conventional Commits 타입을 앞에 둔 형태를 사용합니다.
+예: `feat/notion-retry-state`, `fix/storage-cleanup`, `chore/update-agent-instructions`
+
+커밋 메시지는 Conventional Commits 형식을 따르되, 설명은 한국어로 작성합니다.
+예: `feat: 녹음 업로드 API 추가`, `fix: 완료 후 임시 파일 정리`, `chore: 에이전트 작업 지침 갱신`
 
 `git push`는 사용자가 명시적으로 요청했을 때만 실행합니다. PR 생성도 사용자가 명시적으로 요청했을 때만 진행합니다.
 
