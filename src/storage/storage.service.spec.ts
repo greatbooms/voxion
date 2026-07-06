@@ -74,6 +74,33 @@ describe('StorageService', () => {
     );
   });
 
+  it('removes bulky recording artifacts while preserving the final transcript', async () => {
+    const original = await service.saveOriginalUpload({
+      recordingId,
+      originalFilename: 'meeting.m4a',
+      buffer: Buffer.from('original'),
+    });
+    const normalized = service.normalizedPath(recordingId);
+    const chunk = service.chunkPath(recordingId, 0);
+    const chunkTranscript = service.chunkTranscriptPath(recordingId, 0);
+    const finalTranscript = service.finalTranscriptPath(recordingId);
+
+    for (const path of [normalized, chunk, chunkTranscript, finalTranscript]) {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, Buffer.from(path));
+    }
+
+    await service.removeRecordingArtifacts(recordingId);
+
+    await expect(stat(original.path)).rejects.toThrow();
+    await expect(stat(normalized)).rejects.toThrow();
+    await expect(stat(chunk)).rejects.toThrow();
+    await expect(stat(chunkTranscript)).rejects.toThrow();
+    await expect(readFile(finalTranscript)).resolves.toEqual(
+      Buffer.from(finalTranscript),
+    );
+  });
+
   it('rejects traversal recording IDs', async () => {
     const escapedDirectoryName = `${basename(root)}-escape`;
     const traversalRecordingId = `../../${escapedDirectoryName}`;

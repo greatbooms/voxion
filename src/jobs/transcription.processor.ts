@@ -228,6 +228,7 @@ export class TranscriptionProcessor extends WorkerHost {
         attemptsMade,
         lastError: null,
       });
+      await this.cleanUpRecordingArtifacts(recordingId);
     } catch (error) {
       const errorMessage = this.getErrorMessage(error);
       // While BullMQ retries remain, the recording is queued again rather
@@ -290,6 +291,16 @@ export class TranscriptionProcessor extends WorkerHost {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  private async cleanUpRecordingArtifacts(recordingId: string): Promise<void> {
+    try {
+      await this.storage.removeRecordingArtifacts(recordingId);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to clean up recording artifacts for ${recordingId}: ${this.getErrorMessage(error)}`,
+      );
+    }
   }
 
   private async persistPlannedChunk(recordingId: string, chunk: CreatedChunk) {
