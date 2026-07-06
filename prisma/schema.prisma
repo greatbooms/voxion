@@ -70,6 +70,7 @@ model RecordingChunk {
   bytes          BigInt
   startSeconds   Decimal      @db.Decimal(12, 3)
   endSeconds     Decimal      @db.Decimal(12, 3)
+  overlapSeconds Decimal      @default(0) @db.Decimal(12, 3)
   transcriptPath String?
   text           String?
   errorCode      String?

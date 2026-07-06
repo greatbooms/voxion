@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
-import { Queue } from 'bullmq';
+import { JobProgress, Queue } from 'bullmq';
 import { PROCESS_RECORDING_JOB, TRANSCRIPTION_QUEUE } from './jobs.constants';
 
 export type ProcessRecordingJobData = {
@@ -9,6 +9,13 @@ export type ProcessRecordingJobData = {
 
 export type EnqueueProcessRecordingInput = ProcessRecordingJobData & {
   jobId: string;
+};
+
+export type QueueJobState = {
+  state: string;
+  progress: JobProgress;
+  attemptsMade: number;
+  failedReason: string | null;
 };
 
 @Injectable()
@@ -32,5 +39,20 @@ export class TranscriptionQueue {
     );
 
     return String(job.id ?? input.jobId);
+  }
+
+  async getJobState(jobId: string): Promise<QueueJobState | null> {
+    const job = await this.queue.getJob(jobId);
+
+    if (!job) {
+      return null;
+    }
+
+    return {
+      state: await job.getState(),
+      progress: job.progress,
+      attemptsMade: job.attemptsMade,
+      failedReason: job.failedReason ?? null,
+    };
   }
 }

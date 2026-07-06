@@ -93,15 +93,11 @@ const mappedRecordingWithChunk = {
   title: 'Team sync',
   originalFilename: 'meeting.m4a',
   mimeType: 'audio/m4a',
-  originalPath: '/tmp/originals/meeting.m4a',
   originalBytes: '9007199254740993',
-  normalizedPath: '/tmp/normalized/meeting.wav',
   durationSeconds: '123.456',
   language: 'en',
   model: 'gpt-4o-transcribe',
   chunkCount: 1,
-  transcriptPath: '/tmp/transcript.txt',
-  transcriptText: 'hello',
   notionPageId: null,
   notionUrl: null,
   errorCode: null,
@@ -116,12 +112,9 @@ const mappedRecordingWithChunk = {
       recordingId,
       index: 0,
       status: 'COMPLETED',
-      path: '/tmp/chunks/0.m4a',
       bytes: '9007199254740994',
       startSeconds: '0',
       endSeconds: '123.456',
-      transcriptPath: null,
-      text: 'hello',
       errorCode: null,
       errorMessage: null,
       createdAt: createdAt.toISOString(),
@@ -360,14 +353,53 @@ describe('RecordingsController', () => {
     },
   );
 
-  it.each(['ko', 'en', 'ko-KR'])(
-    'accepts language tag %p',
-    async (language) => {
+  it.each([
+    ['ko', 'ko'],
+    ['en', 'en'],
+    ['ko-KR', 'ko'],
+    ['EN-us', 'en'],
+  ])(
+    'accepts language tag %p and stores the ISO-639-1 primary subtag %p',
+    async (language, stored) => {
       await controller.create({ language }, makeFile());
 
       expect(prisma.recording.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ language }),
+          data: expect.objectContaining({ language: stored }),
+        }),
+      );
+    },
+  );
+
+  it.each([
+    ['array value', ['Team sync']],
+    ['object value', { name: 'Team sync' }],
+  ])('rejects non-string title %s', async (_label, invalidTitle) => {
+    await expect(
+      controller.create({ title: invalidTitle } as any, makeFile()),
+    ).rejects.toThrow('title must be a string.');
+
+    expect(prisma.recording.create).not.toHaveBeenCalled();
+  });
+
+  it('stores a blank title as null', async () => {
+    await controller.create({ title: '   ' }, makeFile());
+
+    expect(prisma.recording.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ title: undefined }),
+      }),
+    );
+  });
+
+  it.each(['audio/x-m4a', 'audio/x-wav', 'audio/mp3'])(
+    'accepts common browser MIME alias %s',
+    async (mimetype) => {
+      await controller.create({}, makeFile({ mimetype }));
+
+      expect(prisma.recording.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ mimeType: mimetype }),
         }),
       );
     },
