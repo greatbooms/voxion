@@ -50,6 +50,7 @@ Voxion은 개인용 녹음 전사 자동화 서버입니다.
 | `src/notion` | Notion page 생성, transcript block append, 재시도 중복 방지 |
 | `src/storage` | storage root 아래 파일 경로 생성, 업로드 이동, 완료 후 artifact cleanup |
 | `src/config` | 환경변수 schema와 app config |
+| `src/health` | 컨테이너/NAS 배포용 얕은 health endpoint |
 | `src/prisma` | Prisma service/module |
 | `prisma` | Prisma schema와 migration |
 
