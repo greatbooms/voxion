@@ -213,6 +213,21 @@ npm test -- --runInBand
 npx prisma validate
 ```
 
+## NAS 배포
+
+Synology NAS 배포는 `GitHub Actions + GHCR + Tailscale + SSH + Docker Compose` 방식으로 구성되어 있습니다.
+
+관련 파일:
+
+- `.github/workflows/deploy.yml`
+- `Dockerfile`
+- `deploy/compose.yml`
+- `scripts/deploy-synology.sh`
+- `docs/deployment-guide.md`
+
+배포 전 NAS에 `/volume1/docker/voxion/.env.prod`와 공유 storage 디렉터리를 준비해야 합니다.
+자세한 절차와 필요한 GitHub Actions Secrets는 [배포 가이드](docs/deployment-guide.md)를 확인하세요.
+
 ## 문제 해결
 
 - `OPENAI_API_KEY is not configured.`: `.env`에 `OPENAI_API_KEY`가 없습니다.

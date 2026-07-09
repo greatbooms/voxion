@@ -35,4 +35,14 @@ describe('App', () => {
   it('returns 404 for unknown routes', async () => {
     await request(app.getHttpServer()).get('/missing').expect(404);
   });
+
+  it('returns a public health response for container healthchecks', async () => {
+    const response = await request(app.getHttpServer()).get('/health').expect(200);
+
+    expect(response.body).toEqual({
+      status: 'ok',
+      timestamp: expect.any(String),
+    });
+    expect(new Date(response.body.timestamp).toString()).not.toBe('Invalid Date');
+  });
 });

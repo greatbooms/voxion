@@ -1,0 +1,15 @@
+node_modules
+dist
+coverage
+storage
+.git
+.github
+.serena
+.codex
+.env
+.env.*
+!.env.example
+npm-debug.log*
+Dockerfile
+README.md
+docs

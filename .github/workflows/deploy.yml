@@ -1,0 +1,145 @@
+name: 메인 배포
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v5
+
+      - name: Docker Buildx 설정
+        uses: docker/setup-buildx-action@v3
+
+      - name: GHCR 로그인
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 배포 시크릿 확인
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+          SYNOLOGY_HOST: ${{ secrets.SYNOLOGY_HOST }}
+          SYNOLOGY_PORT: ${{ secrets.SYNOLOGY_PORT }}
+          SYNOLOGY_USER: ${{ secrets.SYNOLOGY_USER }}
+          SYNOLOGY_SSH_KEY: ${{ secrets.SYNOLOGY_SSH_KEY }}
+          SYNOLOGY_DEPLOY_PATH: ${{ secrets.SYNOLOGY_DEPLOY_PATH }}
+        run: |
+          for name in TS_OAUTH_CLIENT_ID TS_OAUTH_SECRET SYNOLOGY_HOST SYNOLOGY_PORT SYNOLOGY_USER SYNOLOGY_SSH_KEY SYNOLOGY_DEPLOY_PATH; do
+            if [ -z "$(eval "printf '%s' \"\${${name}}\"")" ]; then
+              echo "Missing required secret: ${name}"
+              exit 1
+            fi
+          done
+
+      - name: 이미지 빌드 및 푸시
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Tailscale 연결
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: SSH 설정
+        env:
+          REMOTE_HOST: ${{ secrets.SYNOLOGY_HOST }}
+          REMOTE_PORT: ${{ secrets.SYNOLOGY_PORT }}
+          REMOTE_USER: ${{ secrets.SYNOLOGY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SYNOLOGY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          cat >> ~/.ssh/config <<EOF
+          Host synology
+            HostName ${REMOTE_HOST}
+            Port ${REMOTE_PORT}
+            User ${REMOTE_USER}
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            IdentityFile ~/.ssh/deploy_key
+          EOF
+
+      - name: Tailscale 연결 확인
+        env:
+          REMOTE_HOST: ${{ secrets.SYNOLOGY_HOST }}
+          REMOTE_PORT: ${{ secrets.SYNOLOGY_PORT }}
+        run: |
+          echo "Runner Tailscale IPv4:"
+          tailscale ip -4 || true
+          echo "Tailscale status:"
+          tailscale status || true
+
+          echo "Synology NAS 연결 대기..."
+          for i in $(seq 1 30); do
+            if tailscale ping --timeout=2s ${REMOTE_HOST} >/dev/null 2>&1; then
+              echo "Tailscale ping 성공"
+              exit 0
+            fi
+            if nc -zvw3 ${REMOTE_HOST} ${REMOTE_PORT} >/dev/null 2>&1; then
+              echo "SSH 포트 연결 성공"
+              exit 0
+            fi
+            echo "대기 중... ($i/30)"
+            sleep 2
+          done
+
+          echo "Synology NAS에 연결하지 못했습니다."
+          exit 1
+
+      - name: NAS 배포 파일 업로드
+        env:
+          DEPLOY_PATH: ${{ secrets.SYNOLOGY_DEPLOY_PATH }}
+        run: |
+          ssh -o ConnectTimeout=10 synology "mkdir -p ${DEPLOY_PATH}"
+          ssh -o ConnectTimeout=10 synology "cat > ${DEPLOY_PATH}/compose.yml" < deploy/compose.yml
+          ssh -o ConnectTimeout=10 synology "cat > ${DEPLOY_PATH}/deploy-synology.sh" < scripts/deploy-synology.sh
+
+      - name: 배포 실행
+        env:
+          DEPLOY_PATH: ${{ secrets.SYNOLOGY_DEPLOY_PATH }}
+          IMAGE: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+        run: |
+          ssh -o ConnectTimeout=10 synology \
+            "chmod +x ${DEPLOY_PATH}/deploy-synology.sh && \
+             DEPLOY_PATH=${DEPLOY_PATH} \
+             IMAGE=${IMAGE} \
+             APP_NAME=voxion \
+             API_CONTAINER_NAME=voxion-api \
+             WORKER_CONTAINER_NAME=voxion-worker \
+             ${DEPLOY_PATH}/deploy-synology.sh"
+
+      - name: SSH 키 정리
+        if: always()
+        run: |
+          rm -f ~/.ssh/deploy_key
