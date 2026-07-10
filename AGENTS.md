@@ -43,6 +43,8 @@ Voxion은 개인용 녹음 전사 자동화 서버입니다.
 
 | 경로 | 역할 |
 | --- | --- |
+| `src/auth` | 관리자 로그인, 세션 쿠키, API token 인증 |
+| `src/web` | 브라우저 업로드 화면, job 상태 polling, transcript 표시 |
 | `src/recordings` | 업로드 API, 녹음 조회 API, job 조회 API, 업로드 검증 |
 | `src/jobs` | BullMQ 큐 설정과 전사 워커 orchestration |
 | `src/audio` | ffmpeg 기반 duration probing, MP3 정규화, silence 기반 청킹 |

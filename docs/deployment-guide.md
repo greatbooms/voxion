@@ -6,15 +6,16 @@ Voxion의 기본 운영 배포 대상은 Synology NAS Container Manager입니다
 ## 배포 구조
 
 1. `main` 브랜치에 push 또는 GitHub Actions `workflow_dispatch`
-2. Docker 이미지 빌드
-3. GHCR에 `latest`와 commit SHA 태그 push
-4. GitHub Actions runner가 Tailscale OAuth로 tailnet 접속
-5. Synology NAS에 SSH 접속
-6. `deploy/compose.yml`, `scripts/deploy-synology.sh` 업로드
-7. NAS에서 `docker compose pull`
-8. NAS에서 API/worker 컨테이너 기동
-9. API 컨테이너 `/health` 확인, worker 실행 상태 확인
-10. 현재 실행 중인 이미지를 제외한 예전 GHCR 이미지 정리
+2. GitHub Actions runner가 Tailscale OAuth로 tailnet 접속
+3. Synology NAS SSH 포트와 SSH dry-run preflight 확인
+4. Docker 이미지 빌드
+5. GHCR에 `latest`와 commit SHA 태그 push
+6. Synology NAS에 SSH 접속
+7. `deploy/compose.yml`, `scripts/deploy-synology.sh` 업로드
+8. NAS에서 `docker compose pull`
+9. NAS에서 API/worker 컨테이너 기동
+10. API 컨테이너 `/health` 확인, worker 실행 상태 확인
+11. 현재 실행 중인 이미지를 제외한 예전 GHCR 이미지 정리
 
 ## 컨테이너 구성
 
@@ -71,18 +72,36 @@ REDIS_PORT=6379
 REDIS_PASSWORD=
 REDIS_DB=0
 OPENAI_API_KEY=
+# 추천값은 gpt-4o-transcribe입니다. diarize는 품질/제약을 확인한 뒤에만 사용합니다.
 OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe
+OPENAI_TRANSCRIPTION_PROMPT=
+OPENAI_TRANSCRIPTION_CONTEXT_CHARS=1200
+OPENAI_POST_PROCESSING_ENABLED=false
+OPENAI_POST_PROCESSING_MODEL=gpt-4.1
+OPENAI_POST_PROCESSING_PROMPT=
+OPENAI_POST_PROCESSING_MAX_INPUT_CHARS=24000
+OPENAI_POST_PROCESSING_MAX_CHUNKS=8
 DEFAULT_TRANSCRIPTION_LANGUAGE=ko
 NOTION_TOKEN=
-NOTION_DATA_SOURCE_ID=
+# Notion 페이지 Copy link의 database ID가 아니라 table data source ID를 넣습니다.
+NOTION_TABLE_DATA_SOURCE_ID=
 NOTION_VERSION=2026-03-11
 STORAGE_ROOT=/app/storage
 MAX_UPLOAD_BYTES=2147483648
 CHUNK_TARGET_BYTES=24000000
+# diarize 모델은 timeout 방지를 위해 600 이하를 권장합니다.
+CHUNK_MAX_DURATION_SECONDS=1200
+ADMIN_USERNAME=
+ADMIN_PASSWORD=
+ADMIN_SESSION_SECRET=
+ADMIN_SESSION_TTL_SECONDS=86400
+ADMIN_COOKIE_SECURE=false
+API_ACCESS_TOKEN=
 PORT=3000
 ```
 
 비밀값은 GitHub 이슈, PR, 채팅, 로그에 남기지 않습니다.
+`ADMIN_SESSION_SECRET`과 `API_ACCESS_TOKEN`은 `openssl rand -hex 32`처럼 긴 랜덤 문자열로 생성하는 것을 권장합니다.
 
 ## GitHub Secrets
 
@@ -153,7 +172,8 @@ sudo -n /usr/local/bin/docker logs --tail 200 voxion-api
 
 - `.env.prod` 누락
 - `DATABASE_URL` 오타 또는 DB 접근 실패
-- `OPENAI_API_KEY`, `NOTION_TOKEN`, `NOTION_DATA_SOURCE_ID` 누락
+- `OPENAI_API_KEY`, `NOTION_TOKEN`, `NOTION_TABLE_DATA_SOURCE_ID` 누락
+- `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `ADMIN_SESSION_SECRET` 누락 시 업로드 화면 로그인이 불가능함
 - Prisma migration 실패
 
 ### worker가 재시작을 반복함

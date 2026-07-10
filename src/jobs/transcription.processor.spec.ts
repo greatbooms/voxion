@@ -33,7 +33,7 @@ describe('TranscriptionProcessor', () => {
   });
 
   it('processes a recording through transcription, merge, notion upload, and job completion', async () => {
-    const { processor, prisma, audio, storage, openai, merge, notion } =
+    const { processor, prisma, audio, storage, openai, merge, postProcessor, timeline, notion } =
       createHarness();
     const recording = createRecording();
     const chunks = [
@@ -73,6 +73,15 @@ describe('TranscriptionProcessor', () => {
         { ...chunks[1], text: 'Hello chunk two' },
       ],
     });
+    postProcessor.postProcess.mockResolvedValue({
+      text: 'Corrected chunk one\n\nCorrected chunk two',
+      applied: true,
+      model: 'gpt-4.1',
+      chunkCount: 1,
+    });
+    timeline.addEstimatedTimecodes.mockReturnValue(
+      '[~00:00:00] Corrected chunk one\n\n[~00:01:01] Corrected chunk two',
+    );
     storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
     notion.createRecordingPageMetadata.mockResolvedValue({
       pageId: 'notion-page-id',
@@ -106,6 +115,14 @@ describe('TranscriptionProcessor', () => {
       'UPLOADING_TO_NOTION',
       'COMPLETED',
     ]);
+    expect(prisma.recording.update).toHaveBeenCalledWith({
+      where: { id: recording.id },
+      data: {
+        status: 'PROBING',
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
     expect(audio.probeDurationSeconds).toHaveBeenCalledWith(recording.originalPath);
     expect(prisma.recording.update).toHaveBeenCalledWith({
       where: { id: recording.id },
@@ -151,9 +168,18 @@ describe('TranscriptionProcessor', () => {
       where: { id: recording.id },
       data: { status: 'TRANSCRIBING', chunkCount: chunks.length },
     });
+    expect(notion.ensureRecordingDataSourceReady).toHaveBeenCalledWith();
+    expect(
+      notion.ensureRecordingDataSourceReady.mock.invocationCallOrder[0],
+    ).toBeLessThan(openai.transcribe.mock.invocationCallOrder[0]);
     expect(openai.transcribe).toHaveBeenNthCalledWith(1, {
       path: chunks[0].path,
       language: recording.language,
+    });
+    expect(openai.transcribe).toHaveBeenNthCalledWith(2, {
+      path: chunks[1].path,
+      language: recording.language,
+      contextText: 'Hello chunk one',
     });
     expect(mockedWriteFile).toHaveBeenNthCalledWith(
       1,
@@ -175,12 +201,36 @@ describe('TranscriptionProcessor', () => {
       ],
       { language: recording.language },
     );
+    expect(postProcessor.postProcess).toHaveBeenCalledWith({
+      text: 'Hello chunk one\n\nHello chunk two',
+      language: recording.language,
+    });
+    expect(timeline.addEstimatedTimecodes).toHaveBeenCalledWith(
+      'Corrected chunk one\n\nCorrected chunk two',
+      [
+        { ...chunks[0], text: ' Hello chunk one ' },
+        { ...chunks[1], text: 'Hello chunk two' },
+      ],
+    );
     expect(mockedWriteFile).toHaveBeenNthCalledWith(
       3,
       '/storage/transcripts/final.json',
       JSON.stringify(
         {
-          text: 'Hello chunk one\n\nHello chunk two',
+          text:
+            '[~00:00:00] Corrected chunk one\n\n[~00:01:01] Corrected chunk two',
+          rawText: 'Hello chunk one\n\nHello chunk two',
+          processedText: 'Corrected chunk one\n\nCorrected chunk two',
+          postProcessing: {
+            applied: true,
+            model: 'gpt-4.1',
+            chunkCount: 1,
+          },
+          timecodes: {
+            type: 'estimated',
+            source: 'estimated_chunk_timing_text_position',
+            accuracy: 'approximate',
+          },
           chunks: [
             { ...chunks[0], text: ' Hello chunk one ' },
             { ...chunks[1], text: 'Hello chunk two' },
@@ -204,7 +254,8 @@ describe('TranscriptionProcessor', () => {
     });
     expect(notion.appendTranscriptToPage).toHaveBeenCalledWith({
       pageId: 'notion-page-id',
-      transcript: 'Hello chunk one\n\nHello chunk two',
+      transcript:
+        '[~00:00:00] Corrected chunk one\n\n[~00:01:01] Corrected chunk two',
       chunks: [
         { index: 0, startSeconds: 0, endSeconds: 60.5 },
         { index: 1, startSeconds: 60.5, endSeconds: 121.25 },
@@ -241,6 +292,8 @@ describe('TranscriptionProcessor', () => {
       data: {
         status: 'COMPLETED',
         completedAt: expect.any(Date),
+        errorCode: null,
+        errorMessage: null,
       },
     });
     expect(prisma.jobRun.updateMany).toHaveBeenLastCalledWith({
@@ -316,7 +369,7 @@ describe('TranscriptionProcessor', () => {
   });
 
   it('reuses already completed chunks on retry and transcribes remaining chunks', async () => {
-    const { processor, prisma, audio, storage, openai, merge, notion } =
+    const { processor, prisma, audio, storage, openai, merge, postProcessor, timeline, notion } =
       createHarness();
     const recording = createRecording();
     const chunks = [
@@ -377,6 +430,13 @@ describe('TranscriptionProcessor', () => {
         { ...chunks[1], text: 'Fresh retry text' },
       ],
     });
+    postProcessor.postProcess.mockResolvedValue({
+      text: 'Stored completed text\n\nFresh retry text',
+      applied: false,
+    });
+    timeline.addEstimatedTimecodes.mockReturnValue(
+      '[~00:00:00] Stored completed text\n\n[~00:00:30] Fresh retry text',
+    );
     storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
     notion.createRecordingPageMetadata.mockResolvedValue({
       pageId: 'notion-page-id',
@@ -391,6 +451,7 @@ describe('TranscriptionProcessor', () => {
     expect(openai.transcribe).toHaveBeenCalledWith({
       path: chunks[1].path,
       language: recording.language,
+      contextText: 'Stored completed text',
     });
     expect(merge.merge).toHaveBeenCalledWith(
       [
@@ -401,6 +462,137 @@ describe('TranscriptionProcessor', () => {
     );
     expect(storage.chunkTranscriptPath).toHaveBeenCalledTimes(1);
     expect(storage.chunkTranscriptPath).toHaveBeenCalledWith(recording.id, 1);
+  });
+
+  it('reuses an already finalized transcript on retry without post-processing again', async () => {
+    const { processor, prisma, audio, storage, openai, merge, postProcessor, timeline, notion } =
+      createHarness();
+    const recording = createRecording({
+      transcriptPath: '/storage/transcripts/final.json',
+      transcriptText: '[~00:00:00] Cached final transcript',
+      notionPageId: 'existing-page-id',
+      notionUrl: 'https://notion.test/existing-page',
+    });
+    const chunks = [
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 30,
+        path: '/storage/chunks/000000.mp3',
+        bytes: 1000,
+        overlapSeconds: 0,
+      },
+    ];
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(30);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createChunks.mockResolvedValue(chunks);
+    prisma.recordingChunk.findUnique.mockResolvedValueOnce({
+      recordingId: recording.id,
+      index: 0,
+      status: 'COMPLETED',
+      path: '/storage/chunks/000000.mp3',
+      bytes: 1000n,
+      startSeconds: 0,
+      endSeconds: 30,
+      transcriptPath: '/storage/transcripts/chunks/0.json',
+      text: 'Raw completed text',
+    });
+    merge.merge.mockReturnValue({
+      text: 'Raw completed text',
+      chunks: [{ ...chunks[0], text: 'Raw completed text' }],
+    });
+
+    await expect(
+      processor.process(createJob({ data: { recordingId: recording.id } })),
+    ).resolves.toBeUndefined();
+
+    expect(openai.transcribe).not.toHaveBeenCalled();
+    expect(postProcessor.postProcess).not.toHaveBeenCalled();
+    expect(timeline.addEstimatedTimecodes).not.toHaveBeenCalled();
+    expect(storage.finalTranscriptPath).not.toHaveBeenCalled();
+    expect(mockedWriteFile).not.toHaveBeenCalled();
+    expect(prisma.recording.update).toHaveBeenCalledWith({
+      where: { id: recording.id },
+      data: {
+        status: 'UPLOADING_TO_NOTION',
+        transcriptPath: '/storage/transcripts/final.json',
+        transcriptText: '[~00:00:00] Cached final transcript',
+      },
+    });
+    expect(notion.appendTranscriptToPage).toHaveBeenCalledWith({
+      pageId: 'existing-page-id',
+      transcript: '[~00:00:00] Cached final transcript',
+      chunks: [{ index: 0, startSeconds: 0, endSeconds: 30 }],
+    });
+  });
+
+  it('records post-processing failures in the final transcript metadata', async () => {
+    const { processor, prisma, audio, storage, openai, merge, postProcessor, timeline, notion } =
+      createHarness();
+    const recording = createRecording();
+    const chunks = [
+      {
+        index: 0,
+        startSeconds: 0,
+        endSeconds: 30,
+        path: '/storage/chunks/000000.mp3',
+        bytes: 1000,
+        overlapSeconds: 0,
+      },
+    ];
+
+    prisma.recording.findUnique.mockResolvedValue(recording);
+    audio.probeDurationSeconds.mockResolvedValue(30);
+    storage.normalizedPath.mockReturnValue('/storage/normalized/recording.mp3');
+    audio.createChunks.mockResolvedValue(chunks);
+    storage.chunkTranscriptPath.mockReturnValue('/storage/transcripts/chunks/0.json');
+    openai.transcribe.mockResolvedValue({
+      text: 'Raw transcript',
+      raw: { raw: true },
+    });
+    merge.merge.mockReturnValue({
+      text: 'Raw transcript',
+      chunks: [{ ...chunks[0], text: 'Raw transcript' }],
+    });
+    postProcessor.postProcess.mockRejectedValue(new Error('post-processing limit'));
+    timeline.addEstimatedTimecodes.mockReturnValue(
+      '[~00:00:00] Raw transcript',
+    );
+    storage.finalTranscriptPath.mockReturnValue('/storage/transcripts/final.json');
+    notion.createRecordingPageMetadata.mockResolvedValue({
+      pageId: 'notion-page-id',
+      url: 'https://notion.test/page',
+    });
+
+    await expect(
+      processor.process(createJob({ data: { recordingId: recording.id } })),
+    ).resolves.toBeUndefined();
+
+    expect(mockedWriteFile).toHaveBeenNthCalledWith(
+      2,
+      '/storage/transcripts/final.json',
+      JSON.stringify(
+        {
+          text: '[~00:00:00] Raw transcript',
+          rawText: 'Raw transcript',
+          processedText: 'Raw transcript',
+          postProcessing: {
+            applied: false,
+            errorMessage: 'post-processing limit',
+          },
+          timecodes: {
+            type: 'estimated',
+            source: 'estimated_chunk_timing_text_position',
+            accuracy: 'approximate',
+          },
+          chunks: [{ ...chunks[0], text: 'Raw transcript' }],
+        },
+        null,
+        2,
+      ),
+    );
   });
 
   it('retranscribes a completed chunk when planned chunk metadata changed on retry', async () => {
@@ -704,6 +896,8 @@ describe('TranscriptionProcessor', () => {
       data: {
         status: 'COMPLETED',
         completedAt: expect.any(Date),
+        errorCode: null,
+        errorMessage: null,
       },
     });
     expect(prisma.jobRun.updateMany).toHaveBeenLastCalledWith(
@@ -807,7 +1001,16 @@ function createHarness() {
   const merge = {
     merge: jest.fn(),
   };
+  const postProcessor: { postProcess: jest.Mock } = {
+    postProcess: jest.fn(({ text }) =>
+      Promise.resolve({ text, applied: false }),
+    ),
+  };
+  const timeline = {
+    addEstimatedTimecodes: jest.fn((text) => text),
+  };
   const notion = {
+    ensureRecordingDataSourceReady: jest.fn(),
     createRecordingPage: jest.fn(),
     createRecordingPageMetadata: jest.fn(),
     appendTranscriptToPage: jest.fn(),
@@ -819,10 +1022,22 @@ function createHarness() {
     storage as any,
     openai as any,
     merge as any,
+    postProcessor as any,
+    timeline as any,
     notion as any,
   );
 
-  return { processor, prisma, audio, storage, openai, merge, notion };
+  return {
+    processor,
+    prisma,
+    audio,
+    storage,
+    openai,
+    merge,
+    postProcessor,
+    timeline,
+    notion,
+  };
 }
 
 type RecordingFixture = {
@@ -836,6 +1051,8 @@ type RecordingFixture = {
   recordedAt: Date;
   notionPageId: string | null;
   notionUrl: string | null;
+  transcriptPath: string | null;
+  transcriptText: string | null;
 };
 
 function createRecording(overrides: Partial<RecordingFixture> = {}) {
@@ -850,6 +1067,8 @@ function createRecording(overrides: Partial<RecordingFixture> = {}) {
     recordedAt: new Date('2026-07-02T12:00:00.000Z'),
     notionPageId: null,
     notionUrl: null,
+    transcriptPath: null,
+    transcriptText: null,
     ...overrides,
   };
 }

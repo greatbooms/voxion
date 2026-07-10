@@ -47,7 +47,7 @@ const cutArgs = (start: number, end: number, index: number) => [
 ];
 
 describe('AudioService', () => {
-  const config = { chunkTargetBytes: 25_165_824 };
+  const config = { chunkTargetBytes: 25_165_824, chunkMaxDurationSeconds: 1200 };
   const storage = {
     ensureParent: jest.fn(),
     chunkPath: jest.fn((id: string, index: number) =>
@@ -60,8 +60,9 @@ describe('AudioService', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     config.chunkTargetBytes = 25_165_824;
+    config.chunkMaxDurationSeconds = 1200;
     service = new AudioService(
-      config as AppConfigService,
+      config as unknown as AppConfigService,
       storage as unknown as StorageService,
     );
   });
@@ -286,31 +287,84 @@ describe('AudioService', () => {
     expect(mockedRunCommand).toHaveBeenNthCalledWith(
       2,
       'ffmpeg',
-      cutArgs(0, 2002, 0),
+      cutArgs(0, 1200, 0),
     );
     expect(mockedRunCommand).toHaveBeenNthCalledWith(
       3,
       'ffmpeg',
-      cutArgs(2002, 3600, 1),
+      cutArgs(1198, 2002, 1),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      4,
+      'ffmpeg',
+      cutArgs(2002, 3202, 2),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      5,
+      'ffmpeg',
+      cutArgs(3200, 3600, 3),
     );
     expect(chunks).toEqual([
       {
         index: 0,
         startSeconds: 0,
-        endSeconds: 2002,
+        endSeconds: 1200,
         overlapSeconds: 0,
         path: chunkPathFor(0),
         bytes: 750,
       },
       {
         index: 1,
-        startSeconds: 2002,
-        endSeconds: 3600,
-        overlapSeconds: 0,
+        startSeconds: 1198,
+        endSeconds: 2002,
+        overlapSeconds: 2,
         path: chunkPathFor(1),
         bytes: 750,
       },
+      {
+        index: 2,
+        startSeconds: 2002,
+        endSeconds: 3202,
+        overlapSeconds: 0,
+        path: chunkPathFor(2),
+        bytes: 750,
+      },
+      {
+        index: 3,
+        startSeconds: 3200,
+        endSeconds: 3600,
+        overlapSeconds: 2,
+        path: chunkPathFor(3),
+        bytes: 750,
+      },
     ]);
+  });
+
+  it('caps chunk duration below the OpenAI model duration limit', async () => {
+    mockedRunCommand.mockResolvedValue('');
+    mockedStat.mockResolvedValue({ size: 750 } as Awaited<
+      ReturnType<typeof stat>
+    >);
+
+    const chunks = await service.createChunks({
+      recordingId,
+      normalizedPath: '/storage/normalized.mp3',
+      durationSeconds: 2651.557,
+    });
+
+    expect(chunks.every((chunk) => chunk.endSeconds - chunk.startSeconds <= 1200)).toBe(
+      true,
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      2,
+      'ffmpeg',
+      cutArgs(0, 1200, 0),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      3,
+      'ffmpeg',
+      cutArgs(1198, 2398, 1),
+    );
   });
 
   it('re-splits oversized chunk output instead of failing the job', async () => {
@@ -336,46 +390,72 @@ describe('AudioService', () => {
     expect(mockedRunCommand).toHaveBeenNthCalledWith(
       2,
       'ffmpeg',
-      cutArgs(0, 2700, 0),
+      cutArgs(0, 1200, 0),
     );
     expect(mockedRunCommand).toHaveBeenNthCalledWith(
       3,
       'ffmpeg',
-      cutArgs(2698, 3600, 1),
+      cutArgs(1198, 2398, 1),
     );
     expect(mockedRunCommand).toHaveBeenNthCalledWith(
       4,
       'ffmpeg',
-      cutArgs(2698, 3149, 1),
+      cutArgs(1198, 1798, 1),
     );
     expect(mockedRunCommand).toHaveBeenNthCalledWith(
       5,
       'ffmpeg',
-      cutArgs(3149, 3600, 2),
+      cutArgs(1798, 2398, 2),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      6,
+      'ffmpeg',
+      cutArgs(2396, 3596, 3),
+    );
+    expect(mockedRunCommand).toHaveBeenNthCalledWith(
+      7,
+      'ffmpeg',
+      cutArgs(3594, 3600, 4),
     );
     expect(chunks).toEqual([
       {
         index: 0,
         startSeconds: 0,
-        endSeconds: 2700,
+        endSeconds: 1200,
         overlapSeconds: 0,
         path: chunkPathFor(0),
         bytes: 750,
       },
       {
         index: 1,
-        startSeconds: 2698,
-        endSeconds: 3149,
+        startSeconds: 1198,
+        endSeconds: 1798,
         overlapSeconds: 2,
         path: chunkPathFor(1),
         bytes: 900,
       },
       {
         index: 2,
-        startSeconds: 3149,
-        endSeconds: 3600,
+        startSeconds: 1798,
+        endSeconds: 2398,
         overlapSeconds: 0,
         path: chunkPathFor(2),
+        bytes: 900,
+      },
+      {
+        index: 3,
+        startSeconds: 2396,
+        endSeconds: 3596,
+        overlapSeconds: 2,
+        path: chunkPathFor(3),
+        bytes: 900,
+      },
+      {
+        index: 4,
+        startSeconds: 3594,
+        endSeconds: 3600,
+        overlapSeconds: 2,
+        path: chunkPathFor(4),
         bytes: 900,
       },
     ]);
@@ -402,7 +482,11 @@ describe('AudioService', () => {
       imports: [AudioModule],
     })
       .overrideProvider(AppConfigService)
-      .useValue({ storageRoot: '/storage', chunkTargetBytes: 1_000 })
+      .useValue({
+        storageRoot: '/storage',
+        chunkTargetBytes: 1_000,
+        chunkMaxDurationSeconds: 1200,
+      })
       .compile();
 
     expect(moduleRef.get(AudioService)).toBeInstanceOf(AudioService);

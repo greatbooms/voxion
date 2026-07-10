@@ -8,6 +8,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { OpenaiTranscriptionService } from '../transcription/openai-transcription.service';
 import { TranscriptMergeService } from '../transcription/transcript-merge.service';
+import { TranscriptPostProcessorService } from '../transcription/transcript-post-processor.service';
+import type { TranscriptPostProcessResult } from '../transcription/transcript-post-processor.service';
+import { TranscriptTimelineService } from '../transcription/transcript-timeline.service';
 import { PROCESS_RECORDING_JOB, TRANSCRIPTION_QUEUE } from './jobs.constants';
 import { ProcessRecordingJobData } from './transcription.queue';
 
@@ -26,6 +29,8 @@ export class TranscriptionProcessor extends WorkerHost {
     private readonly storage: StorageService,
     private readonly transcription: OpenaiTranscriptionService,
     private readonly mergeService: TranscriptMergeService,
+    private readonly postProcessor: TranscriptPostProcessorService,
+    private readonly timeline: TranscriptTimelineService,
     private readonly notion: NotionService,
   ) {
     super();
@@ -59,7 +64,11 @@ export class TranscriptionProcessor extends WorkerHost {
     try {
       await this.prisma.recording.update({
         where: { id: recordingId },
-        data: { status: 'PROBING' },
+        data: {
+          status: 'PROBING',
+          errorCode: null,
+          errorMessage: null,
+        },
       });
 
       const durationSeconds = await this.audio.probeDurationSeconds(
@@ -91,8 +100,10 @@ export class TranscriptionProcessor extends WorkerHost {
         where: { id: recordingId },
         data: { status: 'TRANSCRIBING', chunkCount: chunks.length },
       });
+      await this.notion.ensureRecordingDataSourceReady();
 
       const transcriptChunks: TranscriptChunk[] = [];
+      let transcribedAnyChunk = false;
 
       for (const [chunkIndex, chunk] of chunks.entries()) {
         const persistedChunk = persistedChunks[chunkIndex];
@@ -118,9 +129,12 @@ export class TranscriptionProcessor extends WorkerHost {
             },
           });
 
+          const contextText = this.getPreviousTranscriptContext(transcriptChunks);
+          transcribedAnyChunk = true;
           const result = await this.transcription.transcribe({
             path: chunk.path,
             language: recording.language,
+            ...(contextText ? { contextText } : {}),
           });
           const transcriptPath = this.storage.chunkTranscriptPath(
             recordingId,
@@ -162,16 +176,43 @@ export class TranscriptionProcessor extends WorkerHost {
       const merged = this.mergeService.merge(transcriptChunks, {
         language: recording.language,
       });
-      const finalTranscriptPath = this.storage.finalTranscriptPath(recordingId);
+      const reusableFinalTranscript = this.getReusableFinalTranscript(
+        recording,
+        transcribedAnyChunk,
+      );
+      const finalTranscriptPath =
+        reusableFinalTranscript?.path ?? this.storage.finalTranscriptPath(recordingId);
+      const finalTranscript = reusableFinalTranscript
+        ? {
+            text: reusableFinalTranscript.text,
+            rawText: merged.text,
+            processedText: reusableFinalTranscript.text,
+            postProcessing: {
+              applied: false,
+              reused: true,
+            },
+            timecodes: {
+              type: 'estimated',
+              source: 'previous_final_transcript',
+              accuracy: 'approximate',
+            },
+            chunks: merged.chunks,
+          }
+        : await this.buildFinalTranscript(merged, recording.language);
 
-      await this.storage.ensureParent(finalTranscriptPath);
-      await writeFile(finalTranscriptPath, JSON.stringify(merged, null, 2));
+      if (!reusableFinalTranscript) {
+        await this.storage.ensureParent(finalTranscriptPath);
+        await writeFile(
+          finalTranscriptPath,
+          JSON.stringify(finalTranscript, null, 2),
+        );
+      }
       await this.prisma.recording.update({
         where: { id: recordingId },
         data: {
           status: 'UPLOADING_TO_NOTION',
           transcriptPath: finalTranscriptPath,
-          transcriptText: merged.text,
+          transcriptText: finalTranscript.text,
         },
       });
 
@@ -208,7 +249,7 @@ export class TranscriptionProcessor extends WorkerHost {
 
       await this.notion.appendTranscriptToPage({
         pageId: notionPage.pageId,
-        transcript: merged.text,
+        transcript: finalTranscript.text,
         chunks: merged.chunks.map((chunk) => ({
           index: chunk.index,
           startSeconds: Number(chunk.startSeconds),
@@ -221,6 +262,8 @@ export class TranscriptionProcessor extends WorkerHost {
         data: {
           status: 'COMPLETED',
           completedAt: new Date(),
+          errorCode: null,
+          errorMessage: null,
         },
       });
       await this.updateJobRun(job, {
@@ -301,6 +344,86 @@ export class TranscriptionProcessor extends WorkerHost {
         `Failed to clean up recording artifacts for ${recordingId}: ${this.getErrorMessage(error)}`,
       );
     }
+  }
+
+  private getPreviousTranscriptContext(
+    chunks: TranscriptChunk[],
+  ): string | undefined {
+    const text = chunks
+      .map((chunk) => chunk.text)
+      .join('\n\n')
+      .trim();
+
+    return text || undefined;
+  }
+
+  private async postProcessTranscript(
+    text: string,
+    language?: string,
+  ): Promise<TranscriptPostProcessResult> {
+    try {
+      return await this.postProcessor.postProcess({ text, language });
+    } catch (error) {
+      this.logger.warn(
+        `Transcript post-processing failed; using merged transcript: ${this.getErrorMessage(error)}`,
+      );
+      return {
+        text,
+        applied: false,
+        errorMessage: this.getErrorMessage(error),
+      };
+    }
+  }
+
+  private async buildFinalTranscript(
+    merged: { text: string; chunks: TranscriptChunk[] },
+    language?: string,
+  ) {
+    const postProcessed = await this.postProcessTranscript(merged.text, language);
+    const finalText = this.timeline.addEstimatedTimecodes(
+      postProcessed.text,
+      merged.chunks,
+    );
+
+    return {
+      text: finalText,
+      rawText: merged.text,
+      processedText: postProcessed.text,
+      postProcessing: this.toPostProcessingSummary(postProcessed),
+      timecodes: {
+        type: 'estimated',
+        source: 'estimated_chunk_timing_text_position',
+        accuracy: 'approximate',
+      },
+      chunks: merged.chunks,
+    };
+  }
+
+  private toPostProcessingSummary(result: TranscriptPostProcessResult) {
+    return {
+      applied: result.applied,
+      ...(result.model ? { model: result.model } : {}),
+      ...(result.chunkCount ? { chunkCount: result.chunkCount } : {}),
+      ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+    };
+  }
+
+  private getReusableFinalTranscript(
+    recording: { transcriptPath?: string | null; transcriptText?: string | null },
+    transcribedAnyChunk: boolean,
+  ): { path: string; text: string } | null {
+    if (
+      transcribedAnyChunk ||
+      !recording.transcriptPath ||
+      !recording.transcriptText
+    ) {
+      return null;
+    }
+
+    return {
+      path: recording.transcriptPath,
+      text: recording.transcriptText,
+    };
   }
 
   private async persistPlannedChunk(recordingId: string, chunk: CreatedChunk) {

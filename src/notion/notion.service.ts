@@ -6,6 +6,7 @@ import type {
   CreatePageResponse,
   ListBlockChildrenParameters,
   ListBlockChildrenResponse,
+  UpdateDataSourceParameters,
 } from '@notionhq/client/build/src/api-endpoints';
 import { AppConfigService } from '../config/app-config.service';
 import {
@@ -20,6 +21,21 @@ const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 529]);
 const MAX_NOTION_ATTEMPTS = 5;
 const BASE_RETRY_DELAY_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 30_000;
+const REQUIRED_METADATA_PROPERTIES = {
+  Status: {
+    type: 'select',
+    select: { options: [{ name: 'Completed', color: 'green' }] },
+  },
+  Language: { type: 'rich_text', rich_text: {} },
+  Model: { type: 'rich_text', rich_text: {} },
+  'Duration Seconds': { type: 'number', number: { format: 'number' } },
+  'Original Filename': { type: 'rich_text', rich_text: {} },
+  'File Size MB': { type: 'number', number: { format: 'number' } },
+  'Chunk Count': { type: 'number', number: { format: 'number' } },
+  'Recorded At': { type: 'date', date: {} },
+  'Uploaded At': { type: 'date', date: {} },
+  [RECORDING_ID_PROPERTY]: { type: 'rich_text', rich_text: {} },
+} satisfies NonNullable<UpdateDataSourceParameters['properties']>;
 
 type AppendChildBlock = AppendBlockChildrenParameters['children'][number];
 type ChildBlock = ListBlockChildrenResponse['results'][number];
@@ -91,7 +107,7 @@ export class NotionService {
     input: CreateRecordingPageMetadataInput,
   ): Promise<CreateRecordingPageResult> {
     const token = this.config.notionToken;
-    const dataSourceId = this.config.notionDataSourceId;
+    const dataSourceId = this.config.notionTableDataSourceId;
 
     if (!token || !dataSourceId) {
       throw new PreconditionFailedException(
@@ -100,6 +116,7 @@ export class NotionService {
     }
 
     const notion = this.createClient(token);
+    await this.ensureMetadataProperties(notion, dataSourceId);
     const uploadedAt = new Date().toISOString();
     const parameters = this.buildCreatePageParameters(
       input,
@@ -128,11 +145,25 @@ export class NotionService {
     return { pageId: page.id, url: getPageUrl(page) };
   }
 
+  async ensureRecordingDataSourceReady(): Promise<void> {
+    const token = this.config.notionToken;
+    const dataSourceId = this.config.notionTableDataSourceId;
+
+    if (!token || !dataSourceId) {
+      throw new PreconditionFailedException(
+        'Notion environment is not configured.',
+      );
+    }
+
+    const notion = this.createClient(token);
+    await this.ensureMetadataProperties(notion, dataSourceId);
+  }
+
   async findRecordingPage(
     recordingId: string,
   ): Promise<CreateRecordingPageResult | null> {
     const token = this.config.notionToken;
-    const dataSourceId = this.config.notionDataSourceId;
+    const dataSourceId = this.config.notionTableDataSourceId;
 
     if (!token || !dataSourceId) {
       return null;
@@ -290,6 +321,35 @@ export class NotionService {
       auth: token,
       notionVersion: this.config.notionVersion,
     });
+  }
+
+  private async ensureMetadataProperties(
+    notion: Client,
+    dataSourceId: string,
+  ): Promise<void> {
+    const dataSource = await this.callNotion(() =>
+      notion.dataSources.retrieve({ data_source_id: dataSourceId }),
+    );
+    const properties =
+      'properties' in dataSource && dataSource.properties
+        ? dataSource.properties
+        : {};
+    const missingProperties = Object.fromEntries(
+      Object.entries(REQUIRED_METADATA_PROPERTIES).filter(
+        ([name]) => !(name in properties),
+      ),
+    );
+
+    if (Object.keys(missingProperties).length === 0) {
+      return;
+    }
+
+    await this.callNotion(() =>
+      notion.dataSources.update({
+        data_source_id: dataSourceId,
+        properties: missingProperties,
+      }),
+    );
   }
 
   private buildCreatePageParameters(
