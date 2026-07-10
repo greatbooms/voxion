@@ -330,7 +330,7 @@ export const envSchema = z.object({
   OPENAI_TRANSCRIPTION_MODEL: z.string().default('gpt-4o-transcribe'),
   DEFAULT_TRANSCRIPTION_LANGUAGE: z.string().default('ko'),
   NOTION_TOKEN: z.string().optional(),
-  NOTION_DATA_SOURCE_ID: z.string().optional(),
+  NOTION_TABLE_DATA_SOURCE_ID: z.string().optional(),
   NOTION_VERSION: z.string().default('2026-03-11'),
   STORAGE_ROOT: z.string().default('./storage'),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(2147483648),
@@ -387,8 +387,8 @@ export class AppConfigService {
     return this.config.get('NOTION_TOKEN') || undefined;
   }
 
-  get notionDataSourceId(): string | undefined {
-    return this.config.get('NOTION_DATA_SOURCE_ID') || undefined;
+  get notionTableDataSourceId(): string | undefined {
+    return this.config.get('NOTION_TABLE_DATA_SOURCE_ID') || undefined;
   }
 
   get notionVersion(): string {
@@ -1708,7 +1708,7 @@ export class NotionService {
     recordedAt?: Date;
   }): Promise<{ pageId: string; url: string }> {
     const token = this.config.notionToken;
-    const dataSourceId = this.config.notionDataSourceId;
+    const dataSourceId = this.config.notionTableDataSourceId;
     if (!token || !dataSourceId) {
       throw new PreconditionFailedException('Notion environment is not configured.');
     }
@@ -2126,7 +2126,7 @@ Required secrets:
 
 - `OPENAI_API_KEY`
 - `NOTION_TOKEN`
-- `NOTION_DATA_SOURCE_ID`
+- `NOTION_TABLE_DATA_SOURCE_ID`
 
 ## Setup
 
@@ -2186,7 +2186,7 @@ Expected: tests pass and build succeeds.
 ## Manual Smoke Test
 
 - [ ] Confirm `.env` contains local PostgreSQL and Redis values.
-- [ ] Add `OPENAI_API_KEY`, `NOTION_TOKEN`, and `NOTION_DATA_SOURCE_ID` locally.
+- [ ] Add `OPENAI_API_KEY`, `NOTION_TOKEN`, and `NOTION_TABLE_DATA_SOURCE_ID` locally.
 - [ ] Run `npm run prisma:migrate -- --name init`.
 - [ ] Run `npm run start:dev`.
 - [ ] Run `npm run start:worker`.

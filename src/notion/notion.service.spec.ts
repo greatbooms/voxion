@@ -51,7 +51,7 @@ describe('NotionService', () => {
   it('rejects page creation when Notion config is missing', async () => {
     const service = new NotionService({
       notionToken: undefined,
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -63,7 +63,7 @@ describe('NotionService', () => {
   it('rejects page creation when Notion data source id is missing', async () => {
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: undefined,
+      notionTableDataSourceId: undefined,
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -73,6 +73,22 @@ describe('NotionService', () => {
   });
 
   it('creates a page metadata payload and returns page details', async () => {
+    const retrieve = jest.fn().mockResolvedValue({
+      properties: {
+        Name: { type: 'title' },
+        Status: { type: 'select' },
+        Language: { type: 'rich_text' },
+        Model: { type: 'rich_text' },
+        'Duration Seconds': { type: 'number' },
+        'Original Filename': { type: 'rich_text' },
+        'File Size MB': { type: 'number' },
+        'Chunk Count': { type: 'number' },
+        'Recorded At': { type: 'date' },
+        'Uploaded At': { type: 'date' },
+        'Recording Id': { type: 'rich_text' },
+      },
+    });
+    const update = jest.fn();
     const create = jest.fn().mockResolvedValue({
       id: 'page-id',
       url: 'https://notion.so/page-id',
@@ -81,12 +97,13 @@ describe('NotionService', () => {
       () =>
         ({
           pages: { create },
+          dataSources: { retrieve, update },
           blocks: { children: {} },
         }) as unknown as Client,
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -100,6 +117,10 @@ describe('NotionService', () => {
       auth: 'notion-token',
       notionVersion: '2026-03-11',
     });
+    expect(retrieve).toHaveBeenCalledWith({
+      data_source_id: 'data-source-id',
+    });
+    expect(update).not.toHaveBeenCalled();
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
         parent: { data_source_id: 'data-source-id' },
@@ -123,6 +144,53 @@ describe('NotionService', () => {
       pageId: 'page-id',
       url: 'https://notion.so/page-id',
     });
+  });
+
+  it('adds missing metadata properties before creating a page', async () => {
+    const retrieve = jest.fn().mockResolvedValue({
+      properties: {
+        Name: { type: 'title' },
+      },
+    });
+    const update = jest.fn().mockResolvedValue({});
+    const create = jest.fn().mockResolvedValue({
+      id: 'page-id',
+      url: 'https://notion.so/page-id',
+    });
+    MockedClient.mockImplementation(
+      () =>
+        ({
+          pages: { create },
+          dataSources: { retrieve, update },
+          blocks: { children: {} },
+        }) as unknown as Client,
+    );
+    const service = new NotionService({
+      notionToken: 'notion-token',
+      notionTableDataSourceId: 'data-source-id',
+      notionVersion: '2026-03-11',
+    } as AppConfigService);
+
+    await service.createRecordingPageMetadata({
+      ...input,
+      durationSeconds: 12.5,
+      recordedAt: new Date('2026-07-03T01:02:03.000Z'),
+    });
+
+    expect(update).toHaveBeenCalledWith({
+      data_source_id: 'data-source-id',
+      properties: expect.objectContaining({
+        Status: expect.objectContaining({ type: 'select' }),
+        Language: expect.objectContaining({ type: 'rich_text' }),
+        'Recorded At': expect.objectContaining({ type: 'date' }),
+        'Recording Id': expect.objectContaining({
+          type: 'rich_text',
+        }),
+      }),
+    });
+    expect(update.mock.invocationCallOrder[0]).toBeLessThan(
+      create.mock.invocationCallOrder[0],
+    );
   });
 
   it('appends only missing transcript paragraph blocks in batches', async () => {
@@ -179,7 +247,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
     const transcript = Array.from(
@@ -254,7 +322,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -296,7 +364,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -331,6 +399,12 @@ describe('NotionService', () => {
   });
 
   it('keeps createRecordingPage backwards-compatible', async () => {
+    const retrieve = jest.fn().mockResolvedValue({
+      properties: {
+        Name: { type: 'title' },
+      },
+    });
+    const update = jest.fn().mockResolvedValue({});
     const create = jest.fn().mockResolvedValue({
       id: 'page-id',
       url: 'https://notion.so/page-id',
@@ -345,12 +419,13 @@ describe('NotionService', () => {
       () =>
         ({
           pages: { create },
+          dataSources: { retrieve, update },
           blocks: { children: { append, list } },
         }) as unknown as Client,
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -390,7 +465,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
     const sleep = jest.fn().mockResolvedValue(undefined);
@@ -423,7 +498,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
     const sleep = jest.fn().mockResolvedValue(undefined);
@@ -460,7 +535,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -489,7 +564,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -566,7 +641,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -599,7 +674,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -650,7 +725,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -695,16 +770,26 @@ describe('NotionService', () => {
   });
 
   it('includes the Recording Id property when a recording id is provided', async () => {
+    const retrieve = jest.fn().mockResolvedValue({
+      properties: {
+        Name: { type: 'title' },
+      },
+    });
+    const update = jest.fn().mockResolvedValue({});
     const create = jest.fn().mockResolvedValue({
       id: 'page-id',
       url: 'https://notion.so/page-id',
     });
     MockedClient.mockImplementation(
-      () => ({ pages: { create } }) as unknown as Client,
+      () =>
+        ({
+          pages: { create },
+          dataSources: { retrieve, update },
+        }) as unknown as Client,
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -725,6 +810,12 @@ describe('NotionService', () => {
   });
 
   it('retries page creation without Recording Id when the property is missing', async () => {
+    const retrieve = jest.fn().mockResolvedValue({
+      properties: {
+        Name: { type: 'title' },
+      },
+    });
+    const update = jest.fn().mockResolvedValue({});
     const validationError = Object.assign(new Error('property not found'), {
       status: 400,
       code: 'validation_error',
@@ -734,11 +825,15 @@ describe('NotionService', () => {
       .mockRejectedValueOnce(validationError)
       .mockResolvedValue({ id: 'page-id', url: 'https://notion.so/page-id' });
     MockedClient.mockImplementation(
-      () => ({ pages: { create } }) as unknown as Client,
+      () =>
+        ({
+          pages: { create },
+          dataSources: { retrieve, update },
+        }) as unknown as Client,
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -772,7 +867,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -803,7 +898,7 @@ describe('NotionService', () => {
     );
     const service = new NotionService({
       notionToken: 'notion-token',
-      notionDataSourceId: 'data-source-id',
+      notionTableDataSourceId: 'data-source-id',
       notionVersion: '2026-03-11',
     } as AppConfigService);
 
@@ -817,7 +912,7 @@ describe('NotionService', () => {
       .overrideProvider(AppConfigService)
       .useValue({
         notionToken: undefined,
-        notionDataSourceId: undefined,
+        notionTableDataSourceId: undefined,
         notionVersion: '2026-03-11',
       })
       .compile();

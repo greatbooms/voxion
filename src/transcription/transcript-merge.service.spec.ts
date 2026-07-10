@@ -108,6 +108,51 @@ describe('TranscriptMergeService', () => {
     );
   });
 
+  it('preserves speaker-labeled diarized transcript turns as paragraphs', () => {
+    const result = service.merge([
+      {
+        index: 0,
+        text: 'speaker_0: 안녕하세요.\n\nspeaker_1: 네 반갑습니다. 다음 안건 볼까요?',
+      },
+    ]);
+
+    expect(result.text).toBe(
+      'speaker_0: 안녕하세요.\n\nspeaker_1: 네 반갑습니다. 다음 안건 볼까요?',
+    );
+  });
+
+  it('preserves single-letter diarized speaker turns as paragraphs', () => {
+    const result = service.merge([
+      {
+        index: 0,
+        text: 'A: 안녕하세요.\n\nB: 네 반갑습니다.\n\nA: 다음 안건 보겠습니다.',
+      },
+    ]);
+
+    expect(result.text).toBe(
+      'A: 안녕하세요.\n\nB: 네 반갑습니다.\n\nA: 다음 안건 보겠습니다.',
+    );
+  });
+
+  it('preserves speaker turn paragraphs after removing overlapped chunk text', () => {
+    const result = service.merge([
+      {
+        index: 0,
+        text: 'A: 첫 설명입니다.\n\nB: 네 확인했습니다.',
+        overlapSeconds: 0,
+      },
+      {
+        index: 1,
+        text: 'B: 네 확인했습니다.\n\nA: 다음 설명입니다.\n\nC: 질문 있습니다.',
+        overlapSeconds: 2,
+      },
+    ]);
+
+    expect(result.text).toBe(
+      'A: 첫 설명입니다.\n\nB: 네 확인했습니다.\n\nA: 다음 설명입니다.\n\nC: 질문 있습니다.',
+    );
+  });
+
   it('segments long chunk text into readable paragraphs at sentence boundaries', () => {
     const sentence = '이 문장은 충분히 길어서 문단 분할 기준을 검증할 수 있습니다.';
     const sentences = Array.from({ length: 40 }, () => sentence);

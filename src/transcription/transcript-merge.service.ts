@@ -31,15 +31,17 @@ export class TranscriptMergeService {
     let mergedText = '';
 
     for (const chunk of orderedChunks) {
+      const normalized = this.normalizeTranscriptText(chunk.text);
       const text =
         chunk.overlapSeconds && chunk.overlapSeconds > 0
-          ? removeDuplicatedOverlap(
-              mergedText,
-              this.normalizeWhitespace(chunk.text),
-            )
-          : this.normalizeWhitespace(chunk.text);
+          ? removeDuplicatedOverlap(mergedText, normalized)
+          : normalized;
 
-      paragraphs.push(...this.toParagraphs(text, options));
+      paragraphs.push(
+        ...(isSpeakerLabeledText(text)
+          ? splitSpeakerTurns(text)
+          : this.toParagraphs(text, options)),
+      );
 
       if (text.length > 0) {
         mergedText = mergedText.length > 0 ? `${mergedText} ${text}` : text;
@@ -82,6 +84,19 @@ export class TranscriptMergeService {
 
   private normalizeWhitespace(text: string): string {
     return text.trim().replace(/\s+/g, ' ');
+  }
+
+  private normalizeTranscriptText(text: string): string {
+    const trimmed = text.trim();
+
+    if (!trimmed.includes('\n')) {
+      return this.normalizeWhitespace(trimmed);
+    }
+
+    return splitExistingParagraphs(trimmed)
+      .map((paragraph) => paragraph.replace(/\s+/g, ' ').trim())
+      .filter((paragraph) => paragraph.length > 0)
+      .join('\n\n');
   }
 }
 
@@ -130,13 +145,36 @@ function fallbackSentenceSplit(text: string): string[] {
     .filter((sentence) => sentence.length > 0);
 }
 
+function splitExistingParagraphs(text: string): string[] {
+  return text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0);
+}
+
+function splitSpeakerTurns(text: string): string[] {
+  return splitExistingParagraphs(text)
+    .flatMap((paragraph) =>
+      paragraph
+        .replace(/\s+((?:speaker[\w -]*|화자\s*\d+|[A-Z]):\s+)/g, '\n\n$1')
+        .split(/\n{2,}/),
+    )
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0);
+}
+
+function isSpeakerLabeledText(text: string): boolean {
+  return /^(speaker[\w -]*|화자\s*\d+|[A-Z]):\s+/im.test(text);
+}
+
 function removeDuplicatedOverlap(previousText: string, currentText: string): string {
   if (previousText.length === 0 || currentText.length === 0) {
     return currentText;
   }
 
-  const previousWords = previousText.split(' ');
-  const currentWords = currentText.split(' ');
+  const previousWords = words(previousText);
+  const currentWordMatches = Array.from(currentText.matchAll(/\S+/g));
+  const currentWords = currentWordMatches.map((match) => match[0]);
   const maxOverlap = Math.min(previousWords.length, currentWords.length);
 
   for (let size = maxOverlap; size >= 2; size -= 1) {
@@ -144,9 +182,15 @@ function removeDuplicatedOverlap(previousText: string, currentText: string): str
     const currentPrefix = currentWords.slice(0, size).join(' ').toLowerCase();
 
     if (previousSuffix === currentPrefix) {
-      return currentWords.slice(size).join(' ');
+      const nextWord = currentWordMatches[size];
+
+      return nextWord ? currentText.slice(nextWord.index).trim() : '';
     }
   }
 
   return currentText;
+}
+
+function words(text: string): string[] {
+  return Array.from(text.matchAll(/\S+/g), (match) => match[0]);
 }
